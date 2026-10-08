@@ -24,14 +24,60 @@ value*}…? ?**-encoding** *value*? ?**-header** {*key value*}…??
 **myme::parseaddress** *string*  
 **myme::parsedatetime** (*string* \| **-now**) *property*  
 **myme::mapencoding** *encoding_name*  
-**myme::reversemapencoding** *charset_type*
+**myme::reversemapencoding** *charset_type*  
+**myme::parseparams** *value*  
+**myme::formatparams** *value* *params*  
+**myme::word_encode** *encoding* *method* *string* ?**-charset_encoded**
+*boolean*? ?**-maxlength** *length*?  
+**myme::word_decode** *encoded-word*  
+**myme::field_decode** *field*
 
 # DESCRIPTION
 
 The **myme** package provides the commands to create and manipulate MIME
 body parts. It is a fork of the **mime** package from tcllib (version
-1.7.2), made self-contained: it depends on nothing outside the Tcl core.
-See **DIFFERENCES FROM TCLLIB MIME** below.
+1.7.2), made self-contained (it depends on nothing outside the Tcl
+core), with many bugs and RFC compliance problems fixed. Where fixing
+them meant changing behaviour, the fix was preferred over compatibility:
+see **DIFFERENCES FROM TCLLIB MIME** below, and the
+**porting-mime-to-myme** skill distributed with the package.
+
+## Characters and octets
+
+Messages are octets (bytes, i.e. strings with no characters above
+U+00FF), and the body text and header values they contain are
+characters:
+
+- A **-string** given to **-canonical text/\*** is characters. It is
+  encoded in the part’s **charset** parameter when the part is created
+  (raising an error if the charset can’t represent them). If there is no
+  charset parameter and the text isn’t ASCII, **charset=utf-8** is
+  added.
+- Any other **-string** (another **-canonical** type, or a message to
+  parse) must be octets, and a **-file** is read as octets, whatever the
+  type.
+- **getbody** returns the body’s octets, or with **-decode**, characters
+  (decoded from the charset).
+- **buildmessage** returns octets, and **copymessage** writes octets
+  (whatever the channel’s **-encoding**).
+- Header values are characters. On output, non-ASCII values of the
+  unstructured fields **Subject**, **Comments** and
+  **Content-Description** are RFC 2047 encoded, and other fields are
+  written as UTF-8 (RFC 6532: use **word_encode** for display names in
+  address fields where that isn’t supported). Parsed header fields are
+  decoded from UTF-8 where valid (otherwise octet for character), and
+  are not RFC 2047 decoded: use **field_decode** for that.
+- **Content-Type** parameter values (and those handled by
+  **parseparams** / **formatparams**) are characters: RFC 2231
+  continuations and charsets are decoded on parse and used as needed on
+  output.
+
+## Headers
+
+Header fields are unfolded when parsed (RFC 5322 section 2.2.3), and
+folded on output at whitespace (outside quoted-strings) into lines of at
+most 78 characters where possible. A value that contains a line break,
+or that would need a line of more than 998 octets, is an error.
 
 **myme::initialize** ?**-canonical** *type/subtype* ?**-param** {*key value*}…? ?**-encoding** *value*? ?**-header** {*key value*}…?? (**-file** *name* \| **-string** *value* \| **-parts** {*token1* … *tokenN*})  
 Creates a MIME part and returns a token representing it.
@@ -45,13 +91,28 @@ Creates a MIME part and returns a token representing it.
   **charset**) and header keyword/values (e.g.,
   **Content-Disposition**), respectively.
 
+  The *type/subtype* may be followed by parameters (as in a Content-Type
+  header field); **-param** takes precedence over them.
+
   Also, **-encoding**, if present, specifies the
   **Content-Transfer-Encoding** when copying the body. If it is absent,
-  an encoding is chosen based on the content.
+  an encoding is chosen based on the content: none for ASCII text with
+  short lines, **quoted-printable** for text that is mostly ASCII (or
+  has long lines), and **base64** otherwise. Only **7bit**, **8bit** or
+  **binary** are allowed for **multipart/\*** and **message/\*** parts.
+
+  A **-string** for **text/\*** is characters, any other is octets (see
+  **Characters and octets** above).
 
 - If the **-canonical** option is not present, then the MIME part
-  contained in either the **-file** or the **-string** option is parsed,
-  dynamically generating subordinates as appropriate.
+  contained in either the **-file** or the **-string** option (as
+  octets) is parsed, dynamically generating subordinates as appropriate.
+  Parts of **multipart/digest** default to **message/rfc822**. Only
+  **message/rfc822**, **message/global** and **message/news** are parsed
+  as containing a message; other **message/\*** types (such as
+  **message/partial** and **message/delivery-status**) are leaves. A
+  multipart body without a close-delimiter ends at the end of the input,
+  and its last part is taken as **application/octet-stream**.
 
 **myme::finalize** *token* ?**-subordinates all** \| **dynamic** \| **none**?  
 Destroys the MIME part represented by *token*. It returns an empty
@@ -78,7 +139,7 @@ The type/subtype describing the content
 The “Content-Transfer-Encoding”
 
 **params**  
-A list of “Content-Type” parameters
+A dictionary of “Content-Type” parameters, RFC 2231 decoded
 
 **parts**  
 A list of tokens for the part’s subordinates. This property is present
@@ -138,16 +199,14 @@ propagated upwards by **myme::getbody**.
 If the **-command** option is absent, then the return value of
 **myme::getbody** is a string containing the MIME part’s entire body.
 
-If the option **-decode** is absent the return value computed above is
-returned as is. This means that it will be in the charset specified for
-the token and not the usual utf-8. If the option **-decode** is present
-however the command will use the charset information associated with the
-token to convert the string from its encoding into utf-8 before
-returning it.
+Without **-decode** the body is returned as octets (in the part’s
+charset). With **-decode** it is decoded from the charset (US-ASCII if
+none) into characters.
 
 **myme::copymessage** *token* *channel*  
-Writes the MIME part represented by *token* to *channel*, and returns an
-empty string.
+Writes the MIME part represented by *token* to *channel* as octets (the
+channel’s **-encoding** is set to iso8859-1 while doing so, and restored
+afterwards), and returns an empty string.
 
 Line endings are written as **\n**, so the channel’s **-translation**
 determines the line endings of the result: configure it as **crlf** to
@@ -157,9 +216,9 @@ of parts with a **Content-Transfer-Encoding** of **binary** is written
 without end-of-line translation.
 
 **myme::buildmessage** *token*  
-Returns the MIME part represented by *token* in wire format: as bytes
-(the characters encoded in the system encoding), with CRLF line endings.
-Line endings in the content are handled as for **myme::copymessage**.
+Returns the MIME part represented by *token* in wire format: as octets,
+with CRLF line endings. Line endings in the content are handled as for
+**myme::copymessage**.
 
 **myme::parseaddress** *string*  
 Takes a string containing one or more 822-style address specifications
@@ -171,7 +230,7 @@ Each dictionary contains the properties below. Note that one or more of
 these properties may be empty.
 
 **address**  
-local@domain
+local@domain (or just local, if there is no domain)
 
 **comment**  
 822-style comment
@@ -186,7 +245,8 @@ non-empty on a parse error
 this address begins a group
 
 **friendly**  
-user-friendly rendering
+user-friendly rendering: the phrase (unquoted, and RFC 2047 decoded), or
+failing that the comment or local part
 
 **local**  
 the local part (lhs)
@@ -204,8 +264,11 @@ the phrase part
 822-style route specification (obsolete)
 
 **myme::parsedatetime** (*string* \| **-now**) *property*  
-Takes a string containing an 822-style date-time specification and
-returns the specified property.
+Takes a string containing an RFC 5322 date-time specification and
+returns the specified property. The fields are those of the date-time as
+given, in its own zone (in the local zone for **-now**). Comments are
+ignored, and a missing, military or other unknown zone is taken as -0000
+(RFC 5322 section 4.3).
 
 The list of properties and their ranges are:
 
@@ -251,8 +314,11 @@ Sun, Mon, …, Sat
 **year**  
 1900 …
 
+**clock**  
+the time, in seconds since the epoch
+
 **zone**  
--720 .. 720 (minutes east of GMT)
+minutes east of UTC
 
 **myme::mapencoding** *encoding_name*  
 Maps Tcl encodings onto the proper names for their MIME charset type.
@@ -263,7 +329,42 @@ remaining encodings return ““.
 Maps MIME charset types onto Tcl encoding names. Those that are unknown
 return ““.
 
+**myme::parseparams** *value*  
+Parses a header field value consisting of a token and parameters, such
+as Content-Disposition (RFC 2183), and returns a list of the token
+(lower case) and a dictionary of the parameters, RFC 2231 decoded.
+
+**myme::formatparams** *value* *params*  
+The inverse of **parseparams**: returns a header field value made of the
+token *value* and the parameters in the dictionary *params*, using RFC
+2231 for values that are long or not ASCII. For example, for an
+attachment:
+
+    -header [list Content-Disposition \
+        [myme::formatparams attachment [dict create filename $name]]]
+
+**myme::word_encode** *encoding* *method* *string* ?**-charset_encoded** *boolean*? ?**-maxlength** *length*?  
+Returns *string* as RFC 2047 encoded-words, separated by “\n” (a fold),
+each at most *length* (default 66) characters. *encoding* is a Tcl
+encoding name (e.g. **utf-8**), and *method* is **base64** or
+**quoted-printable**. *string* is characters, unless
+**-charset_encoded** is true, in which case it is already encoded in
+*encoding*.
+
+**myme::word_decode** *encoded-word*  
+Decodes a single encoded-word, returning a list of the Tcl encoding, the
+method and the decoded octets.
+
+**myme::field_decode** *field*  
+Returns *field* with its encoded-words decoded into characters.
+Whitespace between adjacent encoded-words is dropped (RFC 2047 section
+6.2), and encoded-words that can’t be decoded (e.g. an unknown charset)
+are left as they are.
+
 # DIFFERENCES FROM TCLLIB MIME
+
+The **porting-mime-to-myme** skill, distributed with the package in
+**claude/skills/**, describes these in detail for porting code.
 
 - The package is **myme** and its commands are in the **::myme**
   namespace, so it can be loaded alongside tcllib’s **mime**.
@@ -301,6 +402,38 @@ return ““.
 - Quoted-printable text encodes CRLF line endings as line breaks rather
   than **=0D**.
 
+- Bodies, messages and headers use the characters/octets model described
+  in **Characters and octets** (mime encoded **-string** inconsistently:
+  as characters in the system encoding for 7bit/8bit with
+  **buildmessage**, and as octets for base64 and quoted-printable).
+  **word_encode** takes characters by default (**-charset_encoded 0**).
+
+- Header fields are unfolded when parsed and folded on output; values
+  containing line breaks are rejected; non-ASCII Subject, Comments and
+  Content-Description are RFC 2047 encoded on output; parsed header
+  fields are decoded from UTF-8. Content-Type is emitted on one (folded)
+  line.
+
+- RFC 2231 parameters are decoded on parse (**params** has the plain
+  names and decoded values) and generated for long or non-ASCII values;
+  **-canonical** accepts inline parameters.
+
+- Only message/rfc822, message/global and message/news are parsed as
+  embedded messages; a multipart **-string** without a close-delimiter
+  parses (like **-file**) instead of raising an error.
+
+- **parsedatetime** fields are in the date-time’s own zone (not the
+  local zone), **proper** keeps the zone given, and missing zones are
+  -0000.
+
+- **parseaddress** no longer adds \*\*@\*\*\[**info hostname**\] to a
+  bare local part, and **friendly** is unquoted and RFC 2047 decoded.
+
+- **field_decode** leaves encoded-words it can’t decode as they are,
+  rather than raising an error.
+
+- Generated multipart boundaries have the form **=*myme***… (no space).
+
 - RFC compliance fixes: **parsedatetime** handles numeric zones (the
   **zone** property failed for all of them), comments, offsets over 12
   hours and unknown zones (as -0000); quoted-printable decoding handles
@@ -325,18 +458,31 @@ return ““.
 ``` tcl
 package require myme
 
-set msg [myme::initialize -canonical {text/plain; charset="UTF-8"} \
-    -encoding 8bit -string "Hello\n"]
+# Body text is characters: encoded as UTF-8 (charset=utf-8 is added)
+set body [myme::initialize -canonical text/plain \
+    -string "Caf\u00e9 \u2615\n"]
+
+# Other bodies are octets
+set h [open report.pdf rb]
+set pdf [read $h]
+close $h
+set att [myme::initialize -canonical application/pdf \
+    -encoding base64 -string $pdf \
+    -header [list Content-Disposition [myme::formatparams attachment \
+        [dict create filename "R\u00e9sum\u00e9.pdf"]]]]
+
+set msg [myme::initialize -canonical multipart/mixed -parts [list $body $att]]
 myme::setheader $msg From    "Sender <sender@example.com>"
 myme::setheader $msg To      "<recipient@example.com>"
-myme::setheader $msg Subject "Test"
-set wire [myme::buildmessage $msg]
-myme::finalize $msg
+myme::setheader $msg Subject "Caf\u00e9 report"   ;# RFC 2047 encoded
+set wire [myme::buildmessage $msg]   ;# octets, CRLF line endings
+myme::finalize $msg -subordinates all
 ```
 
 # SEE ALSO
 
-RFC 2045, RFC 2046, RFC 2047, RFC 2049, RFC 822
+RFC 2045, RFC 2046, RFC 2047, RFC 2049, RFC 2183, RFC 2231, RFC 5322,
+RFC 6532
 
 # KEYWORDS
 
