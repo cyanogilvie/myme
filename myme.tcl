@@ -1,4 +1,7 @@
-# mime.tcl - MIME body parts
+# myme.tcl - MIME body parts
+#
+# Forked from tcllib's mime 1.7.2 package, made self-contained (no
+# dependencies outside the Tcl core).
 #
 # (c) 1999-2000 Marshall T. Rose
 # (c) 2000      Brent Welch
@@ -20,55 +23,39 @@
 # unpublished package of 1999.
 #
 
-# new string features and inline scan are used, requiring 8.3.
-package require Tcl 8.5 9
+package require Tcl 8.6-
 
 package provide myme 1.0.0
-package require tcl::chan::memchan
 
+namespace eval ::myme {
+    # Transfer encoders/decoders, called as:
+    #   $encoding -mode encode|decode -- $data
+    # (the calling convention of the Trf commands mime was written against)
 
-if {[catch {package require Trf 2.0}]} {
-
-    # Fall-back to tcl-based procedures of base64 and quoted-printable
-    # encoders
-    ##
-    # Warning!
-    ##
-    # These are a fragile emulations of the more general calling
-    # sequence that appears to work with this code here.
-    ##
-    # The `__ignored__` arguments are expected to be `--` options on
-    # the caller's side. (See the uses in `copymessageaux`,
-    # `buildmessageaux`, `parsepart`, and `getbody`).
-
-    package require base64 2.0
-    set ::major [lindex [split [package require md5] .] 0]
-
-    # Create these commands in the mime namespace so that they
-    # won't collide with things at the global namespace level
-
-    namespace eval ::myme {
-        proc base64 {-mode what __ignored__ chunk} {
-            return [base64::$what $chunk]
-        }
-        proc quoted-printable {-mode what __ignored__ chunk} {
-            return [myme::qp_$what $chunk]
-        }
-
-        if {$::major < 2} {
-            # md5 v1, result is hex string ready for use.
-            proc md5 {__ignored__ string} {
-                return [md5::md5 $string]
+    proc base64 {-mode what -- data} {
+        switch -- $what {
+            encode {
+                binary encode base64 -maxlen 76 $data
             }
-        } else {
-            # md5 v2, need option to get hex string
-            proc md5 {__ignored__ string} {
-                return [md5::md5 -hex $string]
+            decode {
+                # Strict with respect to end of input, yet lax for
+                # invalid characters outside of that.
+                regsub -all -- {[^A-Za-z0-9+/]} $data {} data
+                binary decode base64 -strict $data
+            }
+            default {
+                error "unknown mode \"$what\""
             }
         }
     }
 
-    unset ::major
+    proc quoted-printable {-mode what -- data} {
+        switch -- $what {
+            encode  {qp_encode $data}
+            decode  {qp_decode $data}
+            default {error "unknown mode \"$what\""}
+        }
+    }
 }
 
 #
@@ -100,7 +87,7 @@ if {[catch {package require Trf 2.0}]} {
 
 namespace eval ::myme {
     variable mime
-    array set mime {uid 0 cid 0}
+    array set mime {uid 0 cid 0 bid 0}
 
     # RFC 822 lexemes
     variable addrtokenL
@@ -1356,12 +1343,14 @@ proc ::myme::getContentType token {
     if {([string match multipart/* $state(content)]) \
         && ($boundary eq {})} {
         # we're doing everything in one pass...
-        set key [clock seconds]$token[info hostname][array get state]
-        set seqno 8
-        while {[incr seqno -1] >= 0} {
-            set key [md5 -- $key]
-        }
-        set boundary "----- =_[string trim [base64 -mode encode -- $key]]"
+        # The boundary only needs to be unique (not unpredictable), so
+        # that it doesn't occur in the content of any of the parts
+        variable mime
+        set key [binary format IIW [pid] [incr mime(bid)] [clock microseconds]]
+        append key [binary format I2 [list \
+            [expr {int(rand()*0x100000000)}] \
+            [expr {int(rand()*0x100000000)}]]]
+        set boundary "----- =_[base64 -mode encode -- $key]"
 
 	set state(boundary) $boundary
 
@@ -1835,8 +1824,10 @@ proc ::myme::getbodyaux {token reason {fragment {}}} {
 #
 #    myme::copymessage copies the MIME part to the specified channel.
 #
-#    myme::copymessage operates synchronously, and uses fileevent to
-#    allow asynchronous operations to proceed independently.
+#    Line endings are written as \n, so the channel's -translation
+#    determines the line endings of the result (set it to crlf for wire
+#    format). The content of parts with a Content-Transfer-Encoding of
+#    "binary" bypasses the translation.
 #
 # Arguments:
 #       token      The MIME token to parse.
@@ -1847,82 +1838,125 @@ proc ::myme::getbodyaux {token reason {fragment {}}} {
 #       is being written to the channel.
 
 proc ::myme::copymessage {token channel} {
-    global errorCode errorInfo
+    copypart $token [list ::myme::chansink $channel]
+    flush $channel
+    return
+}
+
+# ::myme::buildmessage --
+#
+#     Like copymessage, but produces a string rather than writing the
+#     message into a channel. The result is in wire format: CRLF line
+#     endings, encoded as bytes in the system encoding.
+#
+# Arguments:
+#       token      The MIME token to parse.
+#
+# Results:
+#       The message.
+
+proc ::myme::buildmessage token {
+    set message {}
+    copypart $token [list ::myme::stringsink [info level]]
+    ::encoding convertto [::encoding system] $message
+}
+
+# ::myme::chansink, ::myme::stringsink --
+#
+#    Destinations for copypart. Called as {*}$sink kind data, where kind
+#    is "text" (line endings are \n, to be converted as appropriate for
+#    the destination) or "binary" (to be passed through untouched).
+
+proc ::myme::chansink {channel kind data} {
+    if {$kind eq {binary}} {
+        set translation [chan configure $channel -translation]
+        chan configure $channel -translation lf
+        try {
+            puts -nonewline $channel $data
+        } finally {
+            chan configure $channel -translation $translation
+        }
+    } else {
+        puts -nonewline $channel $data
+    }
+}
+
+proc ::myme::stringsink {level kind data} {
+    upvar #$level message message
+    if {$kind eq {text}} {
+        set data [string map {\n \r\n} $data]
+    }
+    append message $data
+}
+
+# ::myme::copypart --
+#
+#    Writes the MIME part to the sink, closing any file opened to do so.
+#
+# Arguments:
+#       token      The MIME token to parse.
+#       sink       Command prefix to write the message to, see chansink.
+#
+# Results:
+#       Returns nothing unless an error is thrown while the message
+#       is being written.
+
+proc ::myme::copypart {token sink} {
     # FRINK: nocheck
     variable $token
     upvar 0 $token state
 
     set openP [info exists state(fd)]
 
-    set code [catch {myme::copymessageaux $token $channel} result]
-    set ecode $errorCode
-    set einfo $errorInfo
-
-    if {!$openP && [info exists state(fd)]} {
-        if {![info exists state(root)]} {
-            catch {close $state(fd)}
+    try {
+        copymessageaux $token $sink
+    } finally {
+        if {!$openP && [info exists state(fd)]} {
+            if {![info exists state(root)]} {
+                catch {close $state(fd)}
+            }
+            unset state(fd)
         }
-        unset state(fd)
     }
-
-    return -code $code -errorinfo $einfo -errorcode $ecode $result
 }
 
 # ::myme::copymessageaux --
 #
-#    myme::copymessageaux copies the MIME part to the specified channel.
+#    myme::copymessageaux writes the MIME part to the sink.
 #
 # Arguments:
 #       token      The MIME token to parse.
-#       channel    The channel to copy the message to.
+#       sink       Command prefix to write the message to, see chansink.
 #
 # Results:
 #       Returns nothing unless an error is thrown while the message
-#       is being written to the channel.
+#       is being written.
 
-proc ::myme::copymessageaux {token channel} {
+proc ::myme::copymessageaux {token sink} {
     # FRINK: nocheck
     variable $token
     upvar 0 $token state
 
-    array set header $state(header)
-
-    set result {}
+    # Includes Content-Transfer-Encoding
+    set headers {}
     foreach {mixed value} [getheader $token] {
-	puts $channel "$mixed: $value"
+        append headers "$mixed: $value\n"
     }
+    {*}$sink text $headers
 
     set boundary $state(boundary) ;# computed by `getheader`
 
+    # Body content in the "text" kind has its line endings normalized to
+    # \n, so that existing CRLFs aren't doubled by the sink
     set converter {}
-    set encoding {}
+    set kind text
     if {$state(value) ne {parts}} {
-        if {$state(canonicalP)} {
-            if {[set encoding $state(encoding)] eq {}} {
-                set encoding [encoding $token]
-            }
-            if {$encoding ne {}} {
-                puts $channel "Content-Transfer-Encoding: $encoding"
-            }
-            switch -- $encoding {
-                base64
-                    -
-                quoted-printable {
-                    set converter $encoding
-                }
-                7bit - 8bit - binary - {} {
-                    # Bugfix for [#477088], also [#539952]
-                    # Go ahead
-                }
-                default {
-                    error "Can't handle content encoding \"$encoding\""
-                }
-            }
+        set encoding [getTransferEncoding $token]
+        if {$encoding eq {binary}} {
+            set kind binary
+        } elseif {$state(canonicalP) && $encoding in {base64 quoted-printable}} {
+            set converter $encoding
         }
-    }
-
-    if {[info exists state(error)]} {
-        unset state(error)
     }
 
     switch -- $state(value) {
@@ -1950,22 +1984,60 @@ proc ::myme::copymessageaux {token channel} {
                 fconfigure $fd -translation binary
             }
 
-            puts $channel {}
+            switch -- $converter {
+                base64 {
+                    # A whole number of 76 character lines of output
+                    # (57 bytes each) per chunk
+                    set chunksize [expr {57 * 574}]
+                }
+                quoted-printable {
+                    # In one piece, so that soft line breaks are
+                    # consistent
+                    set chunksize -1
+                }
+                default {
+                    set chunksize 32766
+                }
+            }
 
+            {*}$sink text \n
+
+            set sep     {}
+            set pending {}
             while {$size != 0 && ![eof $fd]} {
-                if {$size < 0 || $size > 32766} {
-                    set X [read $fd 32766]
+                set n $chunksize
+                if {$size >= 0 && ($n < 0 || $n > $size)} {
+                    set n $size
+                }
+                if {$n < 0} {
+                    set X [read $fd]
                 } else {
-                    set X [read $fd $size]
+                    set X [read $fd $n]
                 }
                 if {$size > 0} {
                     set size [expr {$size - [string length $X]}]
                 }
-                if {$converter eq {}} {
-                    puts -nonewline $channel $X
+
+                if {$converter ne {}} {
+                    if {$X eq {}} continue
+                    {*}$sink text $sep[$converter -mode encode -- $X]
+                    set sep \n
+                } elseif {$kind eq {binary}} {
+                    {*}$sink binary $X
                 } else {
-                    puts -nonewline $channel [$converter -mode encode -- $X]
+                    # Hold back a trailing \r: its \n may start the
+                    # next chunk
+                    set X $pending$X
+                    set pending {}
+                    if {[string index $X end] eq "\r"} {
+                        set pending \r
+                        set X [string range $X 0 end-1]
+                    }
+                    {*}$sink text [string map {\r\n \n} $X]
                 }
+            }
+            if {$pending ne {}} {
+                {*}$sink text $pending
             }
 
             if {$closeP} {
@@ -1986,15 +2058,15 @@ proc ::myme::copymessageaux {token channel} {
 
             switch -glob -- $state(content) {
                 message/* {
-                    puts $channel {}
+                    {*}$sink text \n
                     foreach part $state(parts) {
-                        myme::copymessage $part $channel
+                        copypart $part $sink
                         break
                     }
                 }
 
                 default {
-                    # Note RFC 2046: See buildmessageaux for details.
+                    # Note RFC 2046:
                     #
                     # The boundary delimiter MUST occur at the
                     # beginning of a line, i.e., following a CRLF, and
@@ -2009,12 +2081,11 @@ proc ::myme::copymessageaux {token channel} {
                     #   both file/string branches added CRLF after the
                     #   body parts.
 
-
                     foreach part $state(parts) {
-                        puts $channel \n--$boundary
-                        myme::copymessage $part $channel
+                        {*}$sink text \n--$boundary\n
+                        copypart $part $sink
                     }
-                    puts $channel \n--$boundary--
+                    {*}$sink text \n--$boundary--\n
                 }
             }
 
@@ -2025,83 +2096,21 @@ proc ::myme::copymessageaux {token channel} {
         }
 
         string {
-            if {[catch {fconfigure $channel -buffersize} blocksize]} {
-                set blocksize 4096
-            } elseif {$blocksize < 512} {
-                set blocksize 512
-            }
-            set blocksize [expr {($blocksize / 4) * 3}]
+            {*}$sink text \n
 
-            # [893516]
-            fconfigure $channel -buffersize $blocksize
-
-            puts $channel {}
-
-            #TODO: tests don't cover these paths
-            if {$converter eq {}} {
-                puts -nonewline $channel $state(string)
+            if {$converter ne {}} {
+                {*}$sink text [$converter -mode encode -- $state(string)]
+            } elseif {$kind eq {binary}} {
+                {*}$sink binary $state(string)
             } else {
-                puts -nonewline $channel [$converter -mode encode -- $state(string)]
+                {*}$sink text [string map {\r\n \n} $state(string)]
             }
         }
         default {
             error "Unknown value \"$state(value)\""
         }
     }
-
-    flush $channel
-
-    if {[info exists state(error)]} {
-        error $state(error)
-    }
-}
-
-# ::myme::buildmessage --
-#
-#     Like copymessage, but produces a string rather than writing the message into a channel.
-#
-# Arguments:
-#       token      The MIME token to parse.
-#
-# Results:
-#       The message.
-
-proc ::myme::buildmessage token {
-    global errorCode errorInfo
-    # FRINK: nocheck
-    variable $token
-    upvar 0 $token state
-
-    set openP [info exists state(fd)]
-
-    set code [catch {myme::buildmessageaux $token} result]
-    if {![info exists errorCode]} {
-        set ecode {}
-    } else {
-        set ecode $errorCode
-    }
-    set einfo $errorInfo
-
-    if {!$openP && [info exists state(fd)]} {
-        if {![info exists state(root)]} {
-            catch {close $state(fd)}
-        }
-        unset state(fd)
-    }
-
-    return -code $code -errorinfo $einfo -errorcode $ecode $result
-}
-
-
-proc ::myme::buildmessageaux token {
-	set chan [tcl::chan::memchan]
-	chan configure $chan -translation crlf
-	copymessageaux $token $chan
-	seek $chan 0
-	chan configure $chan -translation binary
-	set res [read $chan]
-	close $chan
-	return $res
+    return
 }
 
 # ::myme::encoding --
@@ -2272,72 +2281,6 @@ proc ::myme::encodinglineP {line} {
     }
 
     return 1
-}
-
-# ::myme::fcopy --
-#
-#    Appears to be unused.
-#
-# Arguments:
-#
-# Results:
-#
-
-proc ::myme::fcopy {token count {error {}}} {
-    # FRINK: nocheck
-    variable $token
-    upvar 0 $token state
-
-    if {$error ne {}} {
-        set state(error) $error
-    }
-    set state(doneP) 1
-}
-
-# ::myme::scopy --
-#
-#    Copy a portion of the contents of a mime token to a channel.
-#
-# Arguments:
-#    token     The token containing the data to copy.
-#       channel   The channel to write the data to.
-#       offset    The location in the string to start copying
-#                 from.
-#       len       The amount of data to write.
-#       blocksize The block size for the write operation.
-#
-# Results:
-#    The specified portion of the string in the mime token is
-#       copied to the specified channel.
-
-proc ::myme::scopy {token channel offset len blocksize} {
-    # FRINK: nocheck
-    variable $token
-    upvar 0 $token state
-
-    if {$len <= 0} {
-        set state(doneP) 1
-        fileevent $channel writable {}
-        return
-    }
-
-    if {[set cc $len] > $blocksize} {
-        set cc $blocksize
-    }
-
-    if {[catch {
-	    puts -nonewline $channel [
-		string range $state(string) $offset [expr {$offset + $cc - 1}]]
-	    fileevent $channel writable [
-		list myme::scopy $token $channel [
-		    incr offset $cc] [incr len -$cc] $blocksize]
-	} result]
-    } {
-        set state(error) $result
-        set state(doneP) 1
-        fileevent $channel writable {}
-    }
-    return
 }
 
 # ::myme::qp_encode --

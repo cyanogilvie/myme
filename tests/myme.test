@@ -1,4 +1,4 @@
-# mime.test - Test suite for TclMIME                     -*- tcl -*-
+# myme.test - Test suite for myme (forked from tcllib mime)                     -*- tcl -*-
 #
 # This file contains a collection of tests for one or more of the Tcl
 # built-in commands.  Sourcing this file into Tcl runs the tests and
@@ -9,20 +9,25 @@
 
 # -------------------------------------------------------------------------
 
-source [file join \
-	[file dirname [file dirname [file join [pwd] [info script]]]] \
-	devtools testutilities.tcl]
-
-testsNeedTcl     8.5
-testsNeedTcltest 2.0
-
-support {
-    # This code loads md5x, i.e. md5 v2. Proper testing should do one
-    # run using md5 v1, aka md5.tcl as well.
-    use md5/md5x.tcl md5
+if {"::tcltest" ni [namespace children]} {
+    package require tcltest
+    namespace import ::tcltest::*
 }
-testing {
-    useLocal mime.tcl mime
+
+package require myme
+
+set ::here [file dirname [file normalize [info script]]]
+
+proc asset name {
+    file join $::here test-assets $name
+}
+
+proc dictsort dict {
+    set out {}
+    foreach key [lsort [dict keys $dict]] {
+        lappend out $key [dict get $dict $key]
+    }
+    return $out
 }
 
 # -------------------------------------------------------------------------
@@ -669,10 +674,175 @@ test mime-14.0 {ticket 5f455d6343} -setup {
     set restore [myme::initialize -string $str]
 } -cleanup {
     myme::finalize $restore
+    file delete $saved
     unset part whole saved stm str
 } -match glob -result "::myme::*"
 
 # -------------------------------------------------------------------------
+# Fixes made in the myme fork
 
-testsuiteCleanup
+proc headercount {msg name} {
+    set head [lindex [split [string map {\r\n\r\n \x00} $msg] \x00] 0]
+    llength [regexp -all -inline -nocase -line "^[string map {- \\-} $name]:" $head]
+}
+
+proc lines msg {
+    split [string map {\r\n \n} $msg] \n
+}
+
+test myme-1.1 {single Content-Transfer-Encoding header: buildmessage, -encoding given} -body {
+    lmap enc {7bit 8bit binary base64 quoted-printable} {
+        set tok [myme::initialize -canonical {text/plain; charset="UTF-8"} -encoding $enc -string "hi\n"]
+        try {
+            list $enc [headercount [myme::buildmessage $tok] Content-Transfer-Encoding]
+        } finally {
+            myme::finalize $tok
+        }
+    }
+} -result {{7bit 1} {8bit 1} {binary 1} {base64 1} {quoted-printable 1}}
+
+test myme-1.2 {single Content-Transfer-Encoding header: buildmessage, -encoding inferred} -body {
+    set tok [myme::initialize -canonical text/plain -string "[string repeat x 100]\n"]
+    set msg [myme::buildmessage $tok]
+    list [headercount $msg Content-Transfer-Encoding] [regexp -line {^Content-Transfer-Encoding: (.*)\r$} $msg - enc] $enc
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg enc
+} -result {1 1 quoted-printable}
+
+test myme-1.3 {single Content-Transfer-Encoding header: copymessage, multipart} -setup {
+    set p1 [myme::initialize -canonical text/plain -encoding 8bit -string "one\n"]
+    set p2 [myme::initialize -canonical application/octet-stream -encoding base64 -string "\x00\x01\x02"]
+    set tok [myme::initialize -canonical multipart/mixed -parts [list $p1 $p2]]
+    set fn [makeFile {} myme-1.3.msg]
+} -body {
+    set h [open $fn w]
+    myme::copymessage $tok $h
+    close $h
+    set h [open $fn r]
+    set msg [read $h]
+    close $h
+    regexp -all -line {^Content-Transfer-Encoding:} $msg
+} -cleanup {
+    myme::finalize $tok -subordinates all
+    removeFile myme-1.3.msg
+    unset -nocomplain p1 p2 tok fn h msg
+} -result 2
+
+test myme-2.1 {buildmessage: CRLF in the body isn't doubled (tcllib ticket 67ace2b948)} -setup {
+    set tok [myme::initialize -canonical text/plain -encoding 8bit -string "a\r\nb\nc\r\n"]
+} -body {
+    set msg [myme::buildmessage $tok]
+    string range $msg [string first \r\n\r\n $msg] end
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg
+} -result "\r\n\r\na\r\nb\r\nc\r\n"
+
+test myme-2.2 {copymessage to a crlf channel: CRLF in the body isn't doubled} -setup {
+    set tok [myme::initialize -canonical text/plain -encoding 8bit -string "a\r\nb\n"]
+    set fn [makeFile {} myme-2.2.msg]
+} -body {
+    set h [open $fn w]
+    chan configure $h -translation crlf
+    myme::copymessage $tok $h
+    close $h
+    set h [open $fn rb]
+    set msg [read $h]
+    close $h
+    list [string match *\r\r* $msg] [string range $msg end-5 end]
+} -cleanup {
+    myme::finalize $tok
+    removeFile myme-2.2.msg
+    unset -nocomplain tok fn h msg
+} -result [list 0 "a\r\nb\r\n"]
+
+test myme-2.3 {buildmessage: binary content isn't translated} -setup {
+    set tok [myme::initialize -canonical application/octet-stream -encoding binary -string "a\nb\r\n"]
+} -body {
+    string range [myme::buildmessage $tok] end-4 end
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result "a\nb\r\n"
+
+test myme-2.4 {buildmessage from a file: CRLF split across read chunks isn't doubled} -setup {
+    set fn [makeFile {} myme-2.4.txt]
+    set h [open $fn wb]
+    # The \r is the last byte of the first 32766 byte chunk
+    puts -nonewline $h "[string repeat x 32765]\r\nend\r\n"
+    close $h
+    set tok [myme::initialize -canonical text/plain -encoding 8bit -file $fn]
+} -body {
+    set msg [myme::buildmessage $tok]
+    list [string match *\r\r* $msg] [string range $msg end-6 end]
+} -cleanup {
+    myme::finalize $tok
+    removeFile myme-2.4.txt
+    unset -nocomplain fn h tok msg
+} -result [list 0 "\r\nend\r\n"]
+
+test myme-3.1 {base64 from a file spanning several read chunks: lines ≤ 76 and round trip} -setup {
+    set fn [makeFile {} myme-3.1.bin]
+    set data {}
+    for {set i 0} {$i < 100000} {incr i} {
+        append data [format %c [expr {($i * 7) & 0xff}]]
+    }
+    set h [open $fn wb]
+    puts -nonewline $h $data
+    close $h
+    set tok [myme::initialize -canonical application/octet-stream -encoding base64 -file $fn]
+} -body {
+    set msg [myme::buildmessage $tok]
+    set body [string range $msg [expr {[string first \r\n\r\n $msg] + 4}] end]
+    set long [lmap line [lines $body] {
+        if {[string length $line] <= 76} continue
+        set line
+    }]
+    set tok2 [myme::initialize -string $msg]
+    list [llength $long] [expr {[myme::getbody $tok2] eq $data}]
+} -cleanup {
+    myme::finalize $tok
+    myme::finalize $tok2
+    removeFile myme-3.1.bin
+    unset -nocomplain fn data i h tok tok2 msg body long
+} -result {0 1}
+
+test myme-4.1 {generated multipart boundaries are distinct and round trip} -setup {
+    set toks {}
+    foreach n {1 2} {
+        set p [myme::initialize -canonical text/plain -string "part $n\n"]
+        lappend toks [myme::initialize -canonical multipart/mixed -parts [list $p]]
+    }
+} -body {
+    set msgs [lmap tok $toks {myme::buildmessage $tok}]
+    set boundaries [lmap msg $msgs {
+        regexp {boundary="([^"]+)"} $msg - b
+        set b
+    }]
+    set bodies [lmap msg $msgs {
+        set t [myme::initialize -string $msg]
+        set body [string trim [myme::getbody [lindex [myme::getproperty $t parts] 0]]]
+        myme::finalize $t -subordinates all
+        set body
+    }]
+    list [expr {[lindex $boundaries 0] ne [lindex $boundaries 1]}] $bodies
+} -cleanup {
+    foreach tok $toks {myme::finalize $tok -subordinates all}
+    unset -nocomplain toks n p tok msgs msg boundaries b bodies t body
+} -result {1 {{part 1} {part 2}}}
+
+test myme-5.1 {no tcllib dependencies loaded} -body {
+    lmap pkg {base64 md5 tcl::chan::memchan tcl::chan::events tcl::chan::core Trf} {
+        if {[package provide $pkg] eq {}} continue
+        set pkg
+    }
+} -result {}
+
+rename headercount {}
+rename lines {}
+
+# -------------------------------------------------------------------------
+
+::tcltest::cleanupTests
 return
