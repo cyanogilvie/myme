@@ -507,6 +507,11 @@ proc ::myme::initializeaux {token args} {
                 set state(count) $value
             }
 
+            -defaultcontent {
+                # Content-Type when the part has none
+                set state(defaultcontent) $value
+            }
+
             -lineslist {
                 set state(lines) $value
                 set state(lines.count) [llength $state(lines)]
@@ -559,6 +564,18 @@ proc ::myme::initializeaux {token args} {
                 }
             }
             default {# Go ahead}
+        }
+
+        # Composite types are only allowed the identity encodings (RFC 2045
+        # section 6.4, RFC 2046 section 5.2.1)
+        if {
+            [string match -nocase {multipart/*} $state(content)]
+            ||
+            [string match -nocase {message/*} $state(content)]
+        } {
+            if {$state(encoding) ni {{} 7bit 8bit binary}} {
+                error "-encoding $state(encoding) not allowed for $state(content)"
+            }
         }
 
         if {[lsearch -exact $state(lowerL) content-id] < 0} {
@@ -713,15 +730,19 @@ proc ::myme::parsepart {token} {
             }
 
             content-transfer-encoding {
+                # Drop comments, e.g. "base64 (encoded)" (RFC 2045 section
+                # 6.1, RFC 5322 section 3.2.2)
+                set value [string tolower [string trim [
+                    regsub -all {\([^()]*\)} $value { }]]]
                 if {
 		    $state(encoding) ne {}
 		    &&
-		    $state(encoding) ne [string tolower $value]
+		    $state(encoding) ne $value
 		} {
                     error "multiple Content-Transfer-Encoding fields starting with $vline"
                 }
 
-                set state(encoding) [string tolower $value]
+                set state(encoding) $value
             }
 
             mime-version {
@@ -747,8 +768,13 @@ proc ::myme::parsepart {token} {
     }
 
     if {![info exists state(content)]} {
-        set state(content) text/plain
-        set state(params) [list charset us-ascii]
+        if {[info exists state(defaultcontent)]} {
+            set state(content) $state(defaultcontent)
+            set state(params) {}
+        } else {
+            set state(content) text/plain
+            set state(params) [list charset us-ascii]
+        }
     }
 
     if {![string match multipart/* $state(content)]} {
@@ -828,6 +854,14 @@ proc ::myme::parsepart {token} {
             set tracelines [list]
     }
 
+    # The default Content-Type of the parts of a multipart/digest is
+    # message/rfc822 (RFC 2046 section 5.1.5)
+    if {$state(content) eq {multipart/digest}} {
+        set childopts {-defaultcontent message/rfc822}
+    } else {
+        set childopts {}
+    }
+
     set inP 0
     set moreP 1
     set forceoctet 0
@@ -874,12 +908,15 @@ proc ::myme::parsepart {token} {
         } else {
             lappend tracelines $line
         }
+        # Delimiter lines may have transport padding (RFC 2046 section
+        # 5.1.1)
+        set delim [string trimright $line " \t"]
 
         if {!$inP} {
             # Haven't seen the starting boundary yet. Check if the
             # current line contains this starting boundary.
 
-            if {$line eq "--$boundary"} {
+            if {$delim eq "--$boundary"} {
                 # Yes. Switch parser state to now search for the
                 # terminating boundary of the part and record where
                 # the part begins (or initialize the recorder for the
@@ -891,7 +928,7 @@ proc ::myme::parsepart {token} {
                     set start [list]
                 }
                 continue
-            } elseif {$line eq "--$boundary--"} {
+            } elseif {$delim eq "--$boundary--"} {
                 # We just saw a terminating boundary before we ever
                 # saw the starting boundary of a part. This forces us
                 # to stop parsing, we do this by forcing the parser
@@ -922,8 +959,8 @@ proc ::myme::parsepart {token} {
         # terminating boundary and the starting boundary of the next
         # part as the end of the current part.
 
-        if {[set moreP [string compare $line --$boundary--]]
-	    && $line ne "--$boundary"} {
+        if {[set moreP [string compare $delim --$boundary--]]
+	    && $delim ne "--$boundary"} {
 
             # The current part has not ended, so we record the line
             # if we are inside a part and doing string parsing.
@@ -949,14 +986,14 @@ proc ::myme::parsepart {token} {
             }
             if {$forceoctet} {
                 if {[catch {
-                    myme::initializeaux $child \
+                    myme::initializeaux $child {*}$childopts \
                         -file $state(file) -root $state(root) \
                         -offset $start -count $count
                 }]} {
                     set nochild 1
                     set state(parts) [lrange $state(parts) 0 end-1]
                 } } else {
-                myme::initializeaux $child \
+                myme::initializeaux $child {*}$childopts \
                     -file $state(file) -root $state(root) \
                     -offset $start -count $count
             }
@@ -964,13 +1001,13 @@ proc ::myme::parsepart {token} {
         } else {
             if {$forceoctet} {
                 if {[catch {
-                    myme::initializeaux $child -lineslist $start
+                    myme::initializeaux $child {*}$childopts -lineslist $start
                 }]} {
                     set nochild 1
                     set state(parts) [lrange $state(parts) 0 end-1]
                 }
             } else {
-                myme::initializeaux $child -lineslist $start
+                myme::initializeaux $child {*}$childopts -lineslist $start
             }
             set start {}
         }
@@ -1112,6 +1149,10 @@ proc ::myme::parsetypeaux {token string} {
                 set state(buffer) [
                     string range $state(buffer) 1 [
                         expr {[string length $state(buffer)] - 2}]]
+                # Undo the quoted-pairs a sender must use (RFC 2045 section
+                # 5.1, RFC 5322 section 3.2.4), only for quotes and backslashes:
+                # some senders don't escape backslashes in Windows paths
+                set state(buffer) [string map [list \\\" \" \\\\ \\] $state(buffer)]
             }
 
             default {
@@ -1326,7 +1367,12 @@ proc ::myme::getContentType token {
         if {$k eq {boundary}} {
 	    set boundary $v
 	}
-        append res ";\n              $k=\"$v\""
+        if {[string index $k end] eq "*"} {
+            # RFC 2231 extended-value: must not be quoted
+            append res ";\n              $k=$v"
+        } else {
+            append res ";\n              $k=\"[string map {\\ \\\\ \" \\\"} $v]\""
+        }
     }
 
     # Save boundary separate from the params
@@ -2309,10 +2355,12 @@ proc ::myme::qp_encode {string {encoded_word 0} {no_softbreak 0}} {
 
     if {$encoded_word} {
         # Special processing for encoded words (RFC 2047)
-        set regexp {[\x00-\x08\x0B-\x1E\x21-\x24\x3D\x40\x5B-\x5E\x60\x7B-\xFF\x09\x5F\x3F]}
+        # Only the characters allowed in an encoded-word in any context
+        # (including a phrase) are left literal (RFC 2047 section 5 (3))
+        set regexp {[^A-Za-z0-9!*+/ -]}
 	lappend mapChars { } _
     } else {
-        set regexp {[\x00-\x08\x0B-\x1E\x21-\x24\x3D\x40\x5B-\x5E\x60\x7B-\xFF]}
+        set regexp {[\x00-\x08\x0B-\x1F\x21-\x24\x3D\x40\x5B-\x5E\x60\x7B-\xFF]}
     }
     regsub -all -- $regexp $string {[format =%02X [scan "\\&" %c]]} string
 
@@ -2322,7 +2370,7 @@ proc ::myme::qp_encode {string {encoded_word 0} {no_softbreak 0}} {
 
     # soft/hard newlines and other
     # Funky cases for SMTP compatibility
-    lappend mapChars " \n" =20\n \t\n =09\n \n\.\n =2E\n "\nFrom " "\n=46rom "
+    lappend mapChars " \n" =20\n \t\n =09\n
 
     set string [string map $mapChars $string]
 
@@ -2358,6 +2406,14 @@ proc ::myme::qp_encode {string {encoded_word 0} {no_softbreak 0}} {
         set result [string range $result 0 end-1]
     }
 
+    if {!$encoded_word} {
+        # Funky cases for SMTP compatibility: lines consisting of a lone
+        # ".", or starting with "From ".  Done after the line breaking,
+        # since that can produce such lines too
+        regsub -all -line {^\.$} $result =2E result
+        regsub -all -line {^From } $result {=46rom } result
+    }
+
     # If the string ends in space or tab, replace with =xx
 
     set lastChar [string index $result end]
@@ -2389,7 +2445,7 @@ proc ::myme::qp_decode {string {encoded_word 0}} {
     # smash the white-space at the ends of lines since that must've been
     # generated by an MUA.
 
-    regsub -all -- {[ \t]+\n} $string \n string
+    regsub -all -- {[ \t]+(\r?\n)} $string {\1} string
     set string [string trimright $string " \t"]
 
     if {$encoded_word} {
@@ -2404,7 +2460,7 @@ proc ::myme::qp_decode {string {encoded_word 0}} {
     # and any encoded word modification.
 
     #TODO: codepath not tested
-    set string [string map [list \\ {\\} =\n {}] $string]
+    set string [string map [list \\ {\\} =\r\n {} =\n {}] $string]
 
     # Decode specials
 
@@ -3231,16 +3287,18 @@ namespace eval ::myme {
                                     Jul Aug Sep Oct Nov Dec]
         variable MONTHS_LONG  [list {} \
                                     January February March April May June July \
-                                    August Sepember October November December]
+                                    August September October November December]
 }
 proc ::myme::parsedatetime {value property} {
     if {$value eq "-now"} {
         set clock [clock seconds]
-    } elseif {[regexp {^(.*) ([+-])([0-9][0-9])([0-9][0-9])$} $value \
-	-> value zone_sign zone_hour zone_min]
-    } {
-        set clock [clock scan $value -gmt 1]
-        if {[info exists zone_min]} {
+    } else {
+        # Drop comments (CFWS), e.g. "-0700 (PDT)"
+        set value [string trim [regsub -all {\([^()]*\)} $value { }]]
+        if {[regexp {^(.*) ([+-])([0-9][0-9])([0-9][0-9])$} $value \
+            -> datetime zone_sign zone_hour zone_min]
+        } {
+            set clock [clock scan $datetime -gmt 1]
             set zone_min [scan $zone_min %d]
             set zone_hour [scan $zone_hour %d]
             set zone [expr {60 * ($zone_min + 60 * $zone_hour)}]
@@ -3248,9 +3306,9 @@ proc ::myme::parsedatetime {value property} {
                 set zone -$zone
             }
             incr clock $zone
+        } else {
+            set clock [clock scan $value]
         }
-    } else {
-        set clock [clock scan $value]
     }
 
     switch -- $property {
@@ -3360,11 +3418,7 @@ proc ::myme::parsedatetime {value property} {
 			||
 			    [scan $value %2d%2d h m] != 2
 			||
-			    $h > 12
-			||
 			    $m > 59
-			||
-			    ($h == 12 && $m > 0)
 		    } {
                         error "malformed timezone-specification: $value"
                     }
@@ -3376,9 +3430,12 @@ proc ::myme::parsedatetime {value property} {
                     set z1 [list  UT GMT EST EDT CST CDT MST MDT PST PDT]
                     set z2 [list   0   0  -5  -4  -6  -5  -7  -6  -8  -7]
                     if {[set x [lsearch -exact $z1 $value]] < 0} {
-                        error "unrecognized timezone-mnemonic: $value"
+                        # Military and other unknown zones are treated as
+                        # -0000 (RFC 5322 section 4.3)
+                        set value 0
+                    } else {
+                        set value [expr {[lindex $z2 $x] * 60}]
                     }
-                    set value [expr {[lindex $z2 $x] * 60}]
                 }
             }
         }
@@ -3771,6 +3828,8 @@ proc ::myme::word_decode {encoded} {
         error "malformed word-encoded expression '$encoded'"
     }
 
+    # Drop any language suffix: charset*lang (RFC 2231 section 5)
+    regsub {\*.*} $charset {} charset
     set enc [reversemapencoding $charset]
     if {$enc eq {}} {
         error "unknown charset '$charset'"

@@ -913,6 +913,100 @@ test myme-6.9 {field_decode keeps encoded trailing spaces (tcllib ticket d3f66f9
     myme::field_decode "=?UTF-8?Q?Neuer_SPD-Generalsekret=C3=A4r_?=\n =?UTF-8?Q?Kl=C3=BCssendorf_warnt_Union_vor_?=\n =?UTF-8?Q?Konflikt_bei_Migration?="
 } -result "Neuer SPD-Generalsekretär Klüssendorf warnt Union vor Konflikt bei Migration"
 
+test myme-7.1 {parsedatetime zone: numeric zones, comments, large offsets, unknown zones (RFC 5322 3.3, 4.3)} -body {
+    lmap z {-0700 +1400 +0530 {-0700 (PDT)} EST Z} {
+        myme::parsedatetime "Thu, 08 Oct 2026 10:00:00 $z" zone
+    }
+} -result {-420 840 330 -420 -300 0}
+
+test myme-7.2 {parsedatetime clock honours the numeric zone} -body {
+    expr {
+        [myme::parsedatetime "Thu, 08 Oct 2026 10:00:00 -0700 (PDT)" clock] -
+        [myme::parsedatetime "Thu, 08 Oct 2026 17:00:00 +0000" clock]
+    }
+} -result 0
+
+test myme-7.3 {parsedatetime lmonth spelling} -body {
+    myme::parsedatetime "Tue, 08 Sep 2026 10:00:00 +0000" lmonth
+} -result September
+
+test myme-7.4 {qp_decode: CRLF soft line breaks and padding (RFC 2045 6.7 rules 3, 5)} -body {
+    myme::qp_decode "abc=\r\ndef=3D  \r\nghi"
+} -result "abcdef=\r\nghi"
+
+test myme-7.5 {qp_encode: lone "." and "From " lines round trip} -body {
+    lmap in [list "Hi\n.\nBye\n" "a\n.\n.\nb" ".\nFrom x" "x\x1fy"] {
+        set e [myme::qp_encode $in]
+        list $e [expr {[myme::qp_decode $e] eq $in}]
+    }
+} -cleanup {
+    unset -nocomplain in e
+} -result [list [list "Hi\n=2E\nBye\n" 1] [list "a\n=2E\n=2E\nb" 1] [list "=2E\n=46rom x" 1] [list x=1Fy 1]]
+
+test myme-7.6 {Q encoded-words encode phrase specials (RFC 2047 5 (3))} -body {
+    set w [myme::word_encode utf-8 quoted-printable "Smith, John (x) <y>; a.b:c" -charset_encoded 0]
+    list $w [myme::field_decode $w]
+} -cleanup {
+    unset -nocomplain w
+} -result {=?UTF-8?Q?Smith=2C_John_=28x=29_=3Cy=3E=3B_a=2Eb=3Ac?= {Smith, John (x) <y>; a.b:c}}
+
+test myme-7.7 {multipart delimiters with transport padding (RFC 2046 5.1.1)} -setup {
+    set tok [myme::initialize -string "Content-Type: multipart/mixed; boundary=B\n\n--B  \nContent-Type: text/plain\n\nx\n--B--\t\n"]
+} -body {
+    myme::getbody [lindex [myme::getproperty $tok parts] 0]
+} -cleanup {
+    myme::finalize $tok -subordinates all
+    unset -nocomplain tok
+} -result x
+
+test myme-7.8 {parameter values: quoted-pairs escaped on output and undone on input, extended values unquoted} -setup {
+    set tok [myme::initialize -canonical text/plain -param {name {a"b\c}} -param {title* utf-8''%E2%82%AC} -string x]
+} -body {
+    set msg [myme::buildmessage $tok]
+    set tok2 [myme::initialize -string $msg]
+    list [regexp {name="a\\"b\\\\c"} $msg] [regexp {title\*=utf-8''%E2%82%AC} $msg] [dictsort [myme::getproperty $tok2 params]]
+} -cleanup {
+    myme::finalize $tok
+    myme::finalize $tok2
+    unset -nocomplain tok tok2 msg
+} -result {1 1 {name {a"b\c} title* utf-8''%E2%82%AC}}
+
+test myme-7.9 {parameter values: unescaped backslashes in Windows paths are kept} -setup {
+    set tok [myme::initialize -string "Content-Type: text/plain; name=\"C:\\dir\\f.txt\"\n\nx"]
+} -body {
+    dict get [myme::getproperty $tok params] name
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result {C:\dir\f.txt}
+
+test myme-7.10 {multipart/digest parts default to message/rfc822 (RFC 2046 5.1.5)} -setup {
+    set tok [myme::initialize -string "Content-Type: multipart/digest; boundary=B\n\n--B\n\nSubject: one\n\nbody1\n--B--\n"]
+} -body {
+    set part [lindex [myme::getproperty $tok parts] 0]
+    list [myme::getproperty $part content] [myme::getheader [lindex [myme::getproperty $part parts] 0] subject]
+} -cleanup {
+    myme::finalize $tok -subordinates all
+    unset -nocomplain tok part
+} -result {message/rfc822 one}
+
+test myme-7.11 {encoded-word charset with a language suffix (RFC 2231 5)} -body {
+    myme::field_decode "=?UTF-8*en?Q?Hello?= world"
+} -result {Hello world}
+
+test myme-7.12 {Content-Transfer-Encoding with a comment and mixed case (RFC 2045 6.1)} -setup {
+    set tok [myme::initialize -string "Content-Type: text/plain\nContent-Transfer-Encoding: Base64 (encoded)\n\naGVsbG8=\n"]
+} -body {
+    myme::getbody $tok
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result hello
+
+test myme-7.13 {composite types only allow identity encodings (RFC 2045 6.4)} -body {
+    myme::initialize -canonical message/rfc822 -encoding base64 -string "Subject: x\n\ny\n"
+} -returnCodes error -result {-encoding base64 not allowed for message/rfc822}
+
 test myme-5.1 {no tcllib dependencies loaded} -body {
     lmap pkg {base64 md5 tcl::chan::memchan tcl::chan::events tcl::chan::core Trf} {
         if {[package provide $pkg] eq {}} continue

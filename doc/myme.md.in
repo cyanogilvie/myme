@@ -305,6 +305,20 @@ the Tcl core. See **DIFFERENCES FROM TCLLIB MIME** below.
 - Quoted-printable text encodes CRLF line endings as line breaks rather
   than **=0D**.
 
+- RFC compliance fixes: **parsedatetime** handles numeric zones (the
+  **zone** property failed for all of them), comments, offsets over 12
+  hours and unknown zones (as -0000); quoted-printable decoding handles
+  CRLF soft line breaks, and encoding protects lone "." and "From " lines
+  correctly; Q encoded-words encode phrase specials such as "," and "(";
+  multipart delimiters may have transport padding; parameter values are
+  escaped on output and quoted-pairs undone on input, and RFC 2231
+  extended values (**name\*=**) are not quoted; parts of a
+  **multipart/digest** default to **message/rfc822**; encoded-words may
+  have a language suffix (**=?utf-8\*en?Q?...?=**);
+  **Content-Transfer-Encoding** may contain comments; and **-encoding**
+  base64 or quoted-printable is rejected for **multipart/\*** and
+  **message/\*** parts.
+
 - Re-serializing a parsed part copies its **Content-Transfer-Encoding**
   as-is: one is no longer invented for parts that didn't have one (which
   corrupted them), and unrecognised ones (e.g. x-uuencode) no longer
