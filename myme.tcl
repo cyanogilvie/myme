@@ -25,7 +25,7 @@
 
 package require Tcl 8.6-
 
-package provide myme 1.0.0
+package provide myme 1.0.1
 
 namespace eval ::myme {
     # Transfer encoders/decoders, called as:

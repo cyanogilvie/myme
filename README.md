@@ -5,7 +5,7 @@ myme — Manipulation of MIME body parts
 # SYNOPSIS
 
 **package require Tcl 8.6-**  
-**package require myme ?1.0.0?**
+**package require myme ?1.0.1?**
 
 **myme::initialize** ?**-canonical** *type/subtype* ?**-param** {*key
 value*}…? ?**-encoding** *value*? ?**-header** {*key value*}…??

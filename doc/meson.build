@@ -25,7 +25,7 @@ if pandoc.found()
     output:   meson.project_name() + '.n',
     command:  [pandoc, '--standalone', '--from', 'markdown', '--to', 'man',
       '@INPUT@', '--output', '@OUTPUT@'],
-    install_dir:      get_option('mandir'),
+    install_dir:      get_option('mandir') / 'mann',
     build_by_default: true,
     install:          true,
   )
