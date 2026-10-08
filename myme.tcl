@@ -362,7 +362,6 @@ namespace eval ::myme {
 #    An initialized mime token.
 
 proc ::myme::initialize args {
-    global errorCode errorInfo
 
     variable mime
 
@@ -396,7 +395,6 @@ proc ::myme::initialize args {
 #       Either configures the mime token, or throws an error.
 
 proc ::myme::initializeaux {token args} {
-    global errorCode errorInfo
     # FRINK: nocheck
     variable $token
     upvar 0 $token state
@@ -607,9 +605,7 @@ proc ::myme::initializeaux {token args} {
         }
     }
 
-    set code [catch {myme::parsepart $token} result]
-    set ecode $errorCode
-    set einfo $errorInfo
+    set code [catch {myme::parsepart $token} result opts]
 
     if {$fileP} {
         if {!$openP} {
@@ -619,7 +615,7 @@ proc ::myme::initializeaux {token args} {
         unset state(fd)
     }
 
-    return -code $code -errorinfo $einfo -errorcode $ecode $result
+    return -options $opts $result
 }
 
 # ::myme::parsepart --
@@ -952,7 +948,6 @@ proc ::myme::parsepart {token} {
                 set count 0
             }
             if {$forceoctet} {
-                set ::errorInfo {}
                 if {[catch {
                     myme::initializeaux $child \
                         -file $state(file) -root $state(root) \
@@ -1002,7 +997,6 @@ proc ::myme::parsepart {token} {
 #       tcl list.
 
 proc ::myme::parsetype {token string} {
-    global errorCode errorInfo
     # FRINK: nocheck
     variable $token
     upvar 0 $token state
@@ -1017,9 +1011,7 @@ proc ::myme::parsetype {token string} {
     set state(tokenL)  $typetokenL
     set state(lexemeL) $typelexemeL
 
-    set code [catch {myme::parsetypeaux $token $string} result]
-    set ecode $errorCode
-    set einfo $errorInfo
+    set code [catch {myme::parsetypeaux $token $string} result opts]
 
     unset {*}{
 	state(input)
@@ -1030,7 +1022,7 @@ proc ::myme::parsetype {token string} {
 	state(lexemeL)
     }
 
-    return -code $code -errorinfo $einfo -errorcode $ecode $result
+    return -options $opts $result
 }
 
 # ::myme::parsetypeaux --
@@ -1435,31 +1427,34 @@ proc ::myme::getheader {token {key {}}} {
 }
 
 
+# ::myme::getTransferEncoding --
+#
+#    Returns the Content-Transfer-Encoding for the part, or {} if it
+#    shouldn't have one.  For a parsed (non-canonical) part this is whatever
+#    its header said, since the body is copied verbatim; for a canonical
+#    part it is the -encoding given, or one chosen to suit the content.
+
 proc ::myme::getTransferEncoding token {
     variable $token
     upvar 0 $token state
-    set res {}
-    if {[set encoding $state(encoding)] eq {}} {
-	set encoding [encoding $token]
+
+    set encoding $state(encoding)
+    if {!$state(canonicalP)} {
+        return $encoding
     }
-    if {$encoding ne {}} {
-	set res $encoding
+
+    if {$encoding eq {}} {
+        set encoding [encoding $token]
     }
     switch -- $encoding {
-	base64
-	    -
-	quoted-printable {
-	    set converter $encoding
-	}
-	7bit - 8bit - binary - {} {
-	    # Bugfix for [#477088], also [#539952]
-	    # Go ahead
-	}
-	default {
-	    error "Can't handle content encoding \"$encoding\""
-	}
+        7bit - 8bit - binary - base64 - quoted-printable - {} {
+            # Bugfix for [#477088], also [#539952]
+        }
+        default {
+            error "Can't handle content encoding \"$encoding\""
+        }
     }
-    return $res
+    return $encoding
 }
 
 # ::myme::setheader --
@@ -1594,7 +1589,6 @@ proc ::myme::setheader {token key value args} {
 #       is returned.
 
 proc ::myme::getbody {token args} {
-    global errorCode errorInfo
     # FRINK: nocheck
     variable $token
     upvar 0 $token state
@@ -1613,8 +1607,6 @@ proc ::myme::getbody {token args} {
     }
 
     set code 0
-    set ecode {}
-    set einfo {}
 
     switch -- $state(value)/$state(canonicalP) {
         file/0 {
@@ -1667,9 +1659,7 @@ proc ::myme::getbody {token args} {
                 if {[string length $fragment] > 0} {
                     uplevel #0 $options(-command) [list data $fragment]
                 }
-            } result]
-            set ecode $errorCode
-            set einfo $errorInfo
+            } result opts]
 
             catch {close $fd}
         }
@@ -1684,9 +1674,7 @@ proc ::myme::getbody {token args} {
                     set fragment [read $fd $options(-blocksize)]]] > 0} {
                         uplevel #0 $options(-command) [list data $fragment]
                     }
-            } result]
-            set ecode $errorCode
-            set einfo $errorInfo
+            } result opts]
 
             catch {close $fd}
         }
@@ -1727,9 +1715,7 @@ proc ::myme::getbody {token args} {
                 if {[string length $fragment] > 0} {
                     uplevel #0 $options(-command) [list data $fragment]
                 }
-            } result]
-            set ecode $errorCode
-            set einfo $errorInfo
+            } result opts]
         }
         default {
             error "Unknown combination \"$state(value)/$state(canonicalP)\""
@@ -1742,12 +1728,10 @@ proc ::myme::getbody {token args} {
         } else {
             uplevel #0 $options(-command) [list end]
         }
-    } result]
-    set ecode $errorCode
-    set einfo $errorInfo
+    } result opts]
 
     if {$code} {
-        return -code $code -errorinfo $einfo -errorcode $ecode $result
+        return -options $opts $result
     }
 
     if {$decode} {
@@ -1958,6 +1942,13 @@ proc ::myme::copymessageaux {token sink} {
             set converter $encoding
         }
     }
+    # In quoted-printable text, line breaks are encoded as (CRLF) hard
+    # line breaks, not =0D (RFC 2045 section 6.7 rule 4)
+    if {$converter eq {quoted-printable} && [string match -nocase text/* $state(content)]} {
+        set crlfP 1
+    } else {
+        set crlfP 0
+    }
 
     switch -- $state(value) {
         file {
@@ -2020,6 +2011,10 @@ proc ::myme::copymessageaux {token sink} {
 
                 if {$converter ne {}} {
                     if {$X eq {}} continue
+                    if {$crlfP} {
+                        # Only quoted-printable, which is read in one piece
+                        set X [string map {\r\n \n} $X]
+                    }
                     {*}$sink text $sep[$converter -mode encode -- $X]
                     set sep \n
                 } elseif {$kind eq {binary}} {
@@ -2099,7 +2094,11 @@ proc ::myme::copymessageaux {token sink} {
             {*}$sink text \n
 
             if {$converter ne {}} {
-                {*}$sink text [$converter -mode encode -- $state(string)]
+                set X $state(string)
+                if {$crlfP} {
+                    set X [string map {\r\n \n} $X]
+                }
+                {*}$sink text [$converter -mode encode -- $X]
             } elseif {$kind eq {binary}} {
                 {*}$sink binary $state(string)
             } else {
@@ -2154,6 +2153,10 @@ proc ::myme::encoding {token} {
             fconfigure $fd -translation binary
 
             while {[gets $fd line] >= 0} {
+                # CRLF is a line ending, not content
+                if {[string index $line end] eq "\r"} {
+                    set line [string range $line 0 end-1]
+                }
                 if {$asciiP} {
                     set asciiP [encodingasciiP $line]
                 }
@@ -2173,7 +2176,8 @@ proc ::myme::encoding {token} {
         }
 
         string {
-            foreach line [split $state(string) "\n"] {
+            # CRLF is a line ending, not content
+            foreach line [split [string map {\r\n \n} $state(string)] \n] {
                 if {$asciiP} {
                     set asciiP [encodingasciiP $line]
                 }
@@ -2193,7 +2197,6 @@ proc ::myme::encoding {token} {
     switch -glob -- $state(content) {
         text/* {
             if {!$asciiP} {
-                #TODO: this path is not covered by tests
                 foreach {k v} $state(params) {
                     if {$k eq "charset"} {
                         set v [string tolower $v]
@@ -2205,6 +2208,9 @@ proc ::myme::encoding {token} {
                         break
                     }
                 }
+                # Mostly ASCII: without a Content-Transfer-Encoding it
+                # would be taken as 7bit (RFC 2045 section 6.1)
+                return quoted-printable
             }
 
             if {!$lineP} {
@@ -2242,7 +2248,7 @@ proc ::myme::encodingasciiP {line} {
             }
 
             default {
-                binary scan $c c c
+                scan $c %c c
                 if {($c < 32) || ($c > 126)} {
                     return 0
                 }
@@ -2252,7 +2258,7 @@ proc ::myme::encodingasciiP {line} {
     if {
 	[set r [string first \r $line]] < 0
 	||
-	$r == {[string length $line] - 1}
+	$r == [string length $line] - 1
     } {
         return 1
     }
@@ -2380,16 +2386,18 @@ proc ::myme::qp_decode {string {encoded_word 0}} {
     # 8.1+ improved string manipulation routines used.
     # Special processing for encoded words (RFC 2047)
 
-    if {$encoded_word} {
-        # _ == \x20, even if SPACE occupies a different code position
-        set string [string map [list _ \u0020] $string]
-    }
-
     # smash the white-space at the ends of lines since that must've been
     # generated by an MUA.
 
     regsub -all -- {[ \t]+\n} $string \n string
     set string [string trimright $string " \t"]
+
+    if {$encoded_word} {
+        # _ == \x20, even if SPACE occupies a different code position.
+        # After the white-space smash: an encoded "_" at the end of an
+        # encoded word is significant (tcllib ticket d3f66f9a75)
+        set string [string map [list _ \u0020] $string]
+    }
 
     # Protect the backslash for later subst and
     # smash soft newlines, has to occur after white-space smash
@@ -2443,7 +2451,6 @@ proc ::myme::qp_decode {string {encoded_word 0}} {
 #       specified in the argument.
 
 proc ::myme::parseaddress {string} {
-    global errorCode errorInfo
 
     variable mime
 
@@ -2452,9 +2459,7 @@ proc ::myme::parseaddress {string} {
     variable $token
     upvar 0 $token state
 
-    set code [catch {myme::parseaddressaux $token $string} result]
-    set ecode $errorCode
-    set einfo $errorInfo
+    set code [catch {myme::parseaddressaux $token $string} result opts]
 
     foreach name [array names state] {
         unset state($name)
@@ -2462,7 +2467,7 @@ proc ::myme::parseaddress {string} {
     # FRINK: nocheck
     catch {unset $token}
 
-    return -code $code -errorinfo $einfo -errorcode $ecode $result
+    return -options $opts $result
 }
 
 # ::myme::parseaddressaux --
@@ -2620,7 +2625,6 @@ proc ::myme::parseaddressaux {token string} {
 #    Returns 1 if there is another address, and 0 if there is not.
 
 proc ::myme::addr_next {token} {
-    global errorCode errorInfo
     # FRINK: nocheck
     variable $token
     upvar 0 $token state
@@ -2628,7 +2632,7 @@ proc ::myme::addr_next {token} {
         unset -nocomplain state($prop)
     }
 
-    switch -- [set code [catch {myme::addr_specification $token} result]] {
+    switch -- [set code [catch {myme::addr_specification $token} result opts]] {
         0 {
             if {!$result} {
                 return 0
@@ -2667,10 +2671,8 @@ proc ::myme::addr_next {token} {
         }
 
         default {
-            set ecode $errorCode
-            set einfo $errorInfo
 
-            return -code $code -errorinfo $einfo -errorcode $ecode $result
+            return -options $opts $result
         }
     }
 

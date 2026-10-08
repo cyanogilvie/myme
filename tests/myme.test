@@ -832,6 +832,87 @@ test myme-4.1 {generated multipart boundaries are distinct and round trip} -setu
     unset -nocomplain toks n p tok msgs msg boundaries b bodies t body
 } -result {1 {{part 1} {part 2}}}
 
+test myme-6.1 {parsing doesn't depend on ::errorCode existing (tcllib ticket 0534941436)} -body {
+    set i [interp create]
+    try {
+        $i eval [list ::tcl::tm::path add {*}[lreverse [::tcl::tm::path list]]]
+        $i eval [list package require myme [package provide myme]]
+        $i eval {
+            unset -nocomplain ::errorCode ::errorInfo
+            set t [myme::initialize -string "MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=SEP\n\n--SEP\nContent-Type: text/plain\n\nbody\n--SEP--\n"]
+            list [myme::getproperty $t content] [llength [myme::getproperty $t parts]]
+        }
+    } finally {
+        interp delete $i
+    }
+} -result {multipart/mixed 1}
+
+test myme-6.2 {encodingasciiP: CR only at the end of a line (tcllib ticket f44bcbf068)} -body {
+    list [myme::encodingasciiP "Simple line\r"] [myme::encodingasciiP "a\rb"]
+} -result {1 0}
+
+test myme-6.3 {encodingasciiP: characters above U+00FF aren't ASCII} -body {
+    myme::encodingasciiP "Ł"
+} -result 0
+
+test myme-6.4 {CRLF text without -encoding needs no Content-Transfer-Encoding} -setup {
+    set tok [myme::initialize -canonical text/plain -string "a\r\nb\r\n"]
+} -body {
+    set msg [myme::buildmessage $tok]
+    list [headercount $msg Content-Transfer-Encoding] [string range $msg end-5 end]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg
+} -result [list 0 "a\r\nb\r\n"]
+
+test myme-6.5 {quoted-printable text: CRLF line breaks are hard breaks, not =0D} -setup {
+    set tok [myme::initialize -canonical text/plain -encoding quoted-printable -string "a\r\nb\n"]
+} -body {
+    set msg [myme::buildmessage $tok]
+    string range $msg [string first \r\n\r\n $msg] end
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg
+} -result "\r\n\r\na\r\nb\r\n"
+
+test myme-6.6 {non-ASCII text without -encoding isn't sent as implicit 7bit} -body {
+    lmap params {{} {-param {charset iso-8859-1}} {-param {charset utf-8}}} {
+        set tok [myme::initialize -canonical text/plain {*}$params -string "caf\xe9\n"]
+        try {
+            regexp -line {^Content-Transfer-Encoding: (.*)\r$} [myme::buildmessage $tok] - enc
+            set enc
+        } finally {
+            myme::finalize $tok
+            unset -nocomplain enc
+        }
+    }
+} -result {quoted-printable quoted-printable base64}
+
+test myme-6.7 {parsed message without Content-Transfer-Encoding: none invented on output (tcllib ticket f44bcbf068)} -setup {
+    set raw "Content-Type: text/plain\n\n[string repeat x 100]\n"
+    set tok [myme::initialize -string $raw]
+} -body {
+    set msg [myme::buildmessage $tok]
+    list [headercount $msg Content-Transfer-Encoding] [expr {[string trim [myme::getbody [set tok2 [myme::initialize -string $msg]]]] eq [string repeat x 100]}]
+} -cleanup {
+    myme::finalize $tok
+    myme::finalize $tok2
+    unset -nocomplain raw tok tok2 msg
+} -result {0 1}
+
+test myme-6.8 {parsed message with an unrecognised Content-Transfer-Encoding can be rebuilt} -setup {
+    set tok [myme::initialize -string "Content-Type: application/octet-stream\nContent-Transfer-Encoding: x-uuencode\n\nbegin 644 x\n`\nend\n"]
+} -body {
+    regexp -line {^Content-Transfer-Encoding: x-uuencode\r$} [myme::buildmessage $tok]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result 1
+
+test myme-6.9 {field_decode keeps encoded trailing spaces (tcllib ticket d3f66f9a75)} -body {
+    myme::field_decode "=?UTF-8?Q?Neuer_SPD-Generalsekret=C3=A4r_?=\n =?UTF-8?Q?Kl=C3=BCssendorf_warnt_Union_vor_?=\n =?UTF-8?Q?Konflikt_bei_Migration?="
+} -result "Neuer SPD-Generalsekretär Klüssendorf warnt Union vor Konflikt bei Migration"
+
 test myme-5.1 {no tcllib dependencies loaded} -body {
     lmap pkg {base64 md5 tcl::chan::memchan tcl::chan::events tcl::chan::core Trf} {
         if {[package provide $pkg] eq {}} continue

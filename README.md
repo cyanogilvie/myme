@@ -287,6 +287,25 @@ return ““.
 
 - Multipart boundaries are generated without md5.
 
+- Parsing no longer silently degrades to text/plain in an interpreter
+  where **::errorCode** doesn’t exist yet (tcllib ticket 0534941436).
+
+- **field_decode** no longer drops encoded spaces at the end of an
+  encoded-word (tcllib ticket d3f66f9a75).
+
+- Choosing a **Content-Transfer-Encoding** when **-encoding** isn’t
+  given: CRLF line endings are no longer mistaken for non-ASCII content
+  or trailing whitespace (tcllib ticket f44bcbf068), and non-ASCII text
+  is never sent without one (which would declare it 7bit).
+
+- Quoted-printable text encodes CRLF line endings as line breaks rather
+  than **=0D**.
+
+- Re-serializing a parsed part copies its **Content-Transfer-Encoding**
+  as-is: one is no longer invented for parts that didn’t have one (which
+  corrupted them), and unrecognised ones (e.g. x-uuencode) no longer
+  raise an error.
+
 # EXAMPLE
 
 ``` tcl
