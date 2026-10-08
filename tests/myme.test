@@ -65,9 +65,7 @@ test mime-2.2 {Generate a multi-part MIME message} {
     list [regexp "MIME-Version: 1.0\r
 Content-Description: Test Multipart\r
 Content-ID: \[^\n]+\r
-Content-Type: multipart/mytype;\r
-              \[^\n]+;\r
-              \[^\n]+\r
+Content-Type: multipart/mytype; \[^\n]+; \[^\n]+\r
 \r
 --bndry\r
 MIME-Version: 1.0\r
@@ -354,26 +352,26 @@ test mime-5.8 {Test word_encode with quoted-printable method across encoded word
  =?ISO-8859-1?Q?=E9?="
 
 test mime-5.9 {Test word_encode with quoted-printable method and multibyte character} {
-    myme::word_encode euc-jp quoted-printable "Following me is a multibyte character \xA4\xCF"
+    myme::word_encode euc-jp quoted-printable "Following me is a multibyte character \xA4\xCF" -charset_encoded 1
 } "=?EUC-JP?Q?Following_me_is_a_multibyte_character_=A4=CF?="
 
 set n 10
 while {$n < 14} {
     test mime-5.$n {Test word_encode with quoted-printable method and multibyte character across encoded word boundary} {
-        myme::word_encode euc-jp quoted-printable "Following me is a multibyte character \xA4\xCF" -maxlength [expr 42 + $n]
+        myme::word_encode euc-jp quoted-printable "Following me is a multibyte character \xA4\xCF" -charset_encoded 1 -maxlength [expr 42 + $n]
     } "=?EUC-JP?Q?Following_me_is_a_multibyte_character_?=
  =?EUC-JP?Q?=A4=CF?="
     incr n
 }
 
 test mime-5.14 {Test word_encode with quoted-printable method and multibyte character (triple)} {
-    myme::word_encode utf-8 quoted-printable "Here is a triple byte encoded character \xE3\x81\xAF"
+    myme::word_encode utf-8 quoted-printable "Here is a triple byte encoded character \xE3\x81\xAF" -charset_encoded 1
 } "=?UTF-8?Q?Here_is_a_triple_byte_encoded_character_=E3=81=AF?="
 
 set n 15
 while {$n < 23} {
     test mime-5.$n {Test word_encode with quoted-printable method and triple byte character across encoded word boundary} {
-        myme::word_encode utf-8 quoted-printable "Here is a triple byte encoded character \xE3\x81\xAF" -maxlength [expr 38 + $n]
+        myme::word_encode utf-8 quoted-printable "Here is a triple byte encoded character \xE3\x81\xAF" -charset_encoded 1 -maxlength [expr 38 + $n]
     } "=?UTF-8?Q?Here_is_a_triple_byte_encoded_character_?=
  =?UTF-8?Q?=E3=81=AF?="
     incr n
@@ -381,14 +379,14 @@ while {$n < 23} {
 
 while {$n < 25} {
     test mime-5.$n {Test word_encode with quoted-printable method and triple byte character across encoded word boundary} {
-        myme::word_encode utf-8 quoted-printable "Here is a triple byte encoded character \xE3\x81\xAF" -maxlength [expr 38 + $n]
+        myme::word_encode utf-8 quoted-printable "Here is a triple byte encoded character \xE3\x81\xAF" -charset_encoded 1 -maxlength [expr 38 + $n]
     } "=?UTF-8?Q?Here_is_a_triple_byte_encoded_character_=E3=81=AF?="
     incr n
 }
 
 while {$n < 29} {
     test mime-5.$n {Test word_encode with base64 method across encoded word boundaries} {
-        myme::word_encode euc-jp base64 "There is a multibyte character \xA4\xCF" -maxlength [expr 28 + $n]
+        myme::word_encode euc-jp base64 "There is a multibyte character \xA4\xCF" -charset_encoded 1 -maxlength [expr 28 + $n]
     } "=?EUC-JP?B?VGhlcmUgaXMgYSBtdWx0aWJ5dGUgY2hhcmFjdGVy?=
  =?EUC-JP?B?IKTP?="
     incr n
@@ -396,7 +394,7 @@ while {$n < 29} {
 
 while {$n < 33} {
     test mime-5.$n {Test word_encode with base64 method and triple byte character across encoded word boundary} {
-        myme::word_encode utf-8 base64 "Here is a multibyte character \xE3\x81\xAF" -maxlength [expr 23 + $n]
+        myme::word_encode utf-8 base64 "Here is a multibyte character \xE3\x81\xAF" -charset_encoded 1 -maxlength [expr 23 + $n]
     } "=?UTF-8?B?SGVyZSBpcyBhIG11bHRpYnl0ZSBjaGFyYWN0ZXIg?=
  =?UTF-8?B?44Gv?="
     incr n
@@ -423,7 +421,7 @@ test mime-5.36 {Test word_encode with base64 method and one byte} {
 } "=?ISO-8859-1?B?YQ==?="
 
 test mime-5.37 {Test word_encode with base64 method and two bytes} {
-    myme::word_encode euc-jp base64 "\xA4\xCF"
+    myme::word_encode euc-jp base64 "\xA4\xCF" -charset_encoded 1
 } "=?EUC-JP?B?pM8=?="
 
 test mime-5.38 {Test word_encode with unknown charset} {
@@ -458,7 +456,7 @@ test mime-5.43 {Test word_encode with maxlength to short for method quoted_print
 
 
 test mime-5.44 {Test word_encode with maxlength to short for method quoted-printable and multibyte character} {
-    catch {myme::word_encode euc-jp quoted-printable "\xA4\xCF" -maxlength 17} errmsg
+    catch {myme::word_encode euc-jp quoted-printable "\xA4\xCF" -charset_encoded 1 -maxlength 17} errmsg
     set errmsg
 } "maxlength 17 too short for chosen charset and encoding"
 
@@ -611,11 +609,9 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZ
     file delete $in $out
     set data
 } {MIME-Version: 1.0
-Content-Disposition: attachment;
- filename="a0036.dss"
+Content-Disposition: attachment; filename="a0036.dss"
 Content-Transfer-Encoding: base64
-Content-Type: application/octet-stream;
-              name="a0036.dss"
+Content-Type: application/octet-stream; name="a0036.dss"
 
 BGRzcwEAAQABAAAAYQAAAAAAAAAAAAAAAAAAACQAAAD+//7/+/8wNzA2MTYwODE1MjQwNzA2
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZ}
@@ -634,9 +630,10 @@ T3JpZ2luYWwtUmVjaXBpZW50OiA8L2ZheD1ibHViYkBndW1taS5ib290PgpBY3Rpb246IGZhaWxl
 ZApEaWFnbm9zdGljLUNvZGU6IHNtdHA7IDU1MCAjNS4xLjAgQWRkcmVzcyByZWplY3RlZC4KUmVt
 b3RlLU1UQTogNTMuMjQuMjgyLjE1MA==
 }]
-    set parts [myme::getproperty $token parts]
-    myme::getheader [lindex $parts end] Remote-MTA
-} 53.24.282.150
+    # message/delivery-status is a leaf (RFC 3464), not an embedded message
+    list [myme::getproperty $token content] [catch {myme::getproperty $token parts}] \
+        [regexp -line -inline {^Remote-MTA: .*$} [myme::getbody $token]]
+} {message/delivery-status 1 {{Remote-MTA: 53.24.282.150}}}
 
 # -------------------------------------------------------------------------
 
@@ -782,7 +779,7 @@ test myme-2.4 {buildmessage from a file: CRLF split across read chunks isn't dou
     unset -nocomplain fn h tok msg
 } -result [list 0 "\r\nend\r\n"]
 
-test myme-3.1 {base64 from a file spanning several read chunks: lines ≤ 76 and round trip} -setup {
+test myme-3.1 {base64 from a file spanning several read chunks: lines <= 76 and round trip} -setup {
     set fn [makeFile {} myme-3.1.bin]
     set data {}
     for {set i 0} {$i < 100000} {incr i} {
@@ -852,7 +849,7 @@ test myme-6.2 {encodingasciiP: CR only at the end of a line (tcllib ticket f44bc
 } -result {1 0}
 
 test myme-6.3 {encodingasciiP: characters above U+00FF aren't ASCII} -body {
-    myme::encodingasciiP "Ł"
+    myme::encodingasciiP "\u0141"
 } -result 0
 
 test myme-6.4 {CRLF text without -encoding needs no Content-Transfer-Encoding} -setup {
@@ -875,7 +872,7 @@ test myme-6.5 {quoted-printable text: CRLF line breaks are hard breaks, not =0D}
     unset -nocomplain tok msg
 } -result "\r\n\r\na\r\nb\r\n"
 
-test myme-6.6 {non-ASCII text without -encoding isn't sent as implicit 7bit} -body {
+test myme-6.6 {non-ASCII text without -encoding isn't sent as implicit 7bit (charset=utf-8 is added)} -body {
     lmap params {{} {-param {charset iso-8859-1}} {-param {charset utf-8}}} {
         set tok [myme::initialize -canonical text/plain {*}$params -string "caf\xe9\n"]
         try {
@@ -886,7 +883,7 @@ test myme-6.6 {non-ASCII text without -encoding isn't sent as implicit 7bit} -bo
             unset -nocomplain enc
         }
     }
-} -result {quoted-printable quoted-printable base64}
+} -result {base64 quoted-printable base64}
 
 test myme-6.7 {parsed message without Content-Transfer-Encoding: none invented on output (tcllib ticket f44bcbf068)} -setup {
     set raw "Content-Type: text/plain\n\n[string repeat x 100]\n"
@@ -911,7 +908,7 @@ test myme-6.8 {parsed message with an unrecognised Content-Transfer-Encoding can
 
 test myme-6.9 {field_decode keeps encoded trailing spaces (tcllib ticket d3f66f9a75)} -body {
     myme::field_decode "=?UTF-8?Q?Neuer_SPD-Generalsekret=C3=A4r_?=\n =?UTF-8?Q?Kl=C3=BCssendorf_warnt_Union_vor_?=\n =?UTF-8?Q?Konflikt_bei_Migration?="
-} -result "Neuer SPD-Generalsekretär Klüssendorf warnt Union vor Konflikt bei Migration"
+} -result "Neuer SPD-Generalsekret\u00e4r Kl\u00fcssendorf warnt Union vor Konflikt bei Migration"
 
 test myme-7.1 {parsedatetime zone: numeric zones, comments, large offsets, unknown zones (RFC 5322 3.3, 4.3)} -body {
     lmap z {-0700 +1400 +0530 {-0700 (PDT)} EST Z} {
@@ -969,7 +966,7 @@ test myme-7.8 {parameter values: quoted-pairs escaped on output and undone on in
     myme::finalize $tok
     myme::finalize $tok2
     unset -nocomplain tok tok2 msg
-} -result {1 1 {name {a"b\c} title* utf-8''%E2%82%AC}}
+} -result [list 1 1 [list name {a"b\c} title \u20ac]]
 
 test myme-7.9 {parameter values: unescaped backslashes in Windows paths are kept} -setup {
     set tok [myme::initialize -string "Content-Type: text/plain; name=\"C:\\dir\\f.txt\"\n\nx"]
@@ -1006,6 +1003,240 @@ test myme-7.12 {Content-Transfer-Encoding with a comment and mixed case (RFC 204
 test myme-7.13 {composite types only allow identity encodings (RFC 2045 6.4)} -body {
     myme::initialize -canonical message/rfc822 -encoding base64 -string "Subject: x\n\ny\n"
 } -returnCodes error -result {-encoding base64 not allowed for message/rfc822}
+
+# Body model: text/* -string is characters, encoded to the charset; other
+# bodies are octets
+
+test myme-8.1 {text -string is encoded in its charset} -body {
+    lmap charset {utf-8 iso-8859-1} {
+        set tok [myme::initialize -canonical text/plain -param [list charset $charset] -encoding 8bit -string "caf\u00e9\n"]
+        try {
+            set msg [myme::buildmessage $tok]
+            binary encode hex [string range $msg end-5 end]
+        } finally {
+            myme::finalize $tok
+        }
+    }
+} -cleanup {
+    unset -nocomplain charset tok msg
+} -result {6166c3a90d0a 636166e90d0a}
+
+test myme-8.2 {non-ASCII text without a charset gets charset=utf-8} -setup {
+    set tok [myme::initialize -canonical text/plain -encoding 8bit -string "\u2615\n"]
+} -body {
+    set msg [myme::buildmessage $tok]
+    list [regexp {charset="utf-8"} $msg] [binary encode hex [string range $msg end-4 end]]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg
+} -result {1 e298950d0a}
+
+test myme-8.3 {ASCII text without a charset doesn't get one} -setup {
+    set tok [myme::initialize -canonical text/plain -string "plain\n"]
+} -body {
+    regexp {charset} [myme::buildmessage $tok]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result 0
+
+test myme-8.4 {text with characters the charset can't represent is an error} -body {
+    myme::initialize -canonical text/plain -param {charset iso-8859-1} -string "\u2615"
+} -returnCodes error -result {-string has characters that charset "iso-8859-1" can't represent}
+
+test myme-8.5 {non-text -string must be octets} -body {
+    myme::initialize -canonical application/octet-stream -encoding base64 -string "\u2615"
+} -returnCodes error -result {-string for application/octet-stream must be octets (bytes), not characters above U+00FF}
+
+test myme-8.6 {parsed -string must be octets} -body {
+    myme::initialize -string "Subject: \u2615\n\nx"
+} -returnCodes error -result {-string must be the octets (bytes) of a message, not characters above U+00FF}
+
+test myme-8.7 {getbody returns octets, -decode returns characters} -setup {
+    set tok [myme::initialize -canonical text/plain -string "\u2615"]
+} -body {
+    list [binary encode hex [myme::getbody $tok]] [expr {[myme::getbody $tok -decode] eq "\u2615"}]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result {e29895 1}
+
+test myme-8.8 {copymessage writes the same octets as buildmessage, whatever the channel encoding} -setup {
+    set tok [myme::initialize -canonical text/plain -encoding 8bit -string "\u2615\n"]
+    myme::setheader $tok Subject "Caf\u00e9"
+    set fn [makeFile {} myme-8.8.msg]
+} -body {
+    set h [open $fn w]
+    chan configure $h -translation crlf -encoding utf-8
+    myme::copymessage $tok $h
+    set enc [chan configure $h -encoding]
+    close $h
+    set h [open $fn rb]
+    set got [read $h]
+    close $h
+    list [expr {$got eq [myme::buildmessage $tok]}] $enc
+} -cleanup {
+    myme::finalize $tok
+    removeFile myme-8.8.msg
+    unset -nocomplain tok fn h got enc
+} -result {1 utf-8}
+
+test myme-8.9 {round trip of non-ASCII text, Subject and parameters} -setup {
+    set fn "R\u00e9sum\u00e9 \u2013 final version for the committee meeting of October.pdf"
+    set att [myme::initialize -canonical application/pdf -param [list name $fn] \
+        -header [list Content-Disposition [myme::formatparams attachment [dict create filename $fn]]] \
+        -encoding base64 -string "%PDF-1.4"]
+    set body [myme::initialize -canonical text/plain -string "Caf\u00e9 \u2615\n"]
+    set tok [myme::initialize -canonical multipart/mixed -parts [list $body $att]]
+    myme::setheader $tok Subject "R\u00e9sum\u00e9 attached \u2014 [string repeat {long subject words } 4]"
+} -body {
+    set msg [myme::buildmessage $tok]
+    set p [myme::initialize -string $msg]
+    lassign [myme::getproperty $p parts] pbody patt
+    list \
+        [expr {[myme::field_decode [lindex [myme::getheader $p Subject] 0]] eq [string trim [lindex [myme::getheader $tok Subject] 0]]}] \
+        [expr {[dict get [myme::getproperty $patt params] name] eq $fn}] \
+        [expr {[dict get [lindex [myme::parseparams [lindex [myme::getheader $patt Content-Disposition] 0]] 1] filename] eq $fn}] \
+        [expr {[myme::getbody $pbody -decode] eq "Caf\u00e9 \u2615\n"}] \
+        [regexp {[^\x00-\x7F]} $msg] \
+        [llength [lmap l [split $msg \n] {if {[string length $l] <= 79} continue; set l}]]
+} -cleanup {
+    myme::finalize $tok -subordinates all
+    myme::finalize $p -subordinates all
+    unset -nocomplain fn att body tok msg p pbody patt
+} -result {1 1 1 1 0 0}
+
+test myme-8.10 {-canonical with inline parameters, overridden by -param} -body {
+    set t1 [myme::initialize -canonical {Text/Plain; charset="UTF-8"} -encoding 8bit -string "café"]
+    set t2 [myme::initialize -param {charset iso-8859-1} -canonical {text/plain; charset="UTF-8"; format=flowed} -string x]
+    list [myme::getproperty $t1 content] [dictsort [myme::getproperty $t1 params]] \
+        [regexp -all {charset} [myme::buildmessage $t1]] [dictsort [myme::getproperty $t2 params]]
+} -cleanup {
+    myme::finalize $t1
+    myme::finalize $t2
+    unset -nocomplain t1 t2
+} -result {text/plain {charset UTF-8} 1 {charset iso-8859-1 format flowed}}
+
+# Headers
+
+test myme-9.1 {header fields are folded at 78 characters (RFC 5322 2.1.1)} -setup {
+    set tok [myme::initialize -canonical text/plain -string x]
+    myme::setheader $tok X-Long [string repeat {word } 40]
+} -body {
+    set msg [myme::buildmessage $tok]
+    set long [lmap l [split $msg \n] {if {[string length $l] <= 79} continue; set l}]
+    list [llength $long] [regexp {X-Long: word word} $msg]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg long
+} -result {0 1}
+
+test myme-9.2 {header field values can't contain line breaks} -setup {
+    set tok [myme::initialize -canonical text/plain -string x]
+    myme::setheader $tok Subject "a\nBcc: victim@example.com"
+} -body {
+    myme::buildmessage $tok
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -returnCodes error -result {header field Subject: value contains a line break}
+
+test myme-9.3 {unfoldable header lines over 998 octets are an error} -setup {
+    set tok [myme::initialize -canonical text/plain -string x]
+    myme::setheader $tok X-Long [string repeat x 1000]
+} -body {
+    myme::buildmessage $tok
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -returnCodes error -result {header field X-Long: a line is longer than 998 octets, and has no whitespace to fold at}
+
+test myme-9.4 {parsed header fields are unfolded (RFC 5322 2.2.3) and UTF-8 decoded (RFC 6532)} -setup {
+    set tok [myme::initialize -string [encoding convertto utf-8 "Subject: hello\n world\nX-Name: J\u00fcrgen\n\nx"]]
+} -body {
+    list [myme::getheader $tok Subject] [myme::getheader $tok X-Name]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result [list {{hello world}} [list "J\u00fcrgen"]]
+
+test myme-9.5 {non-ASCII Subject is RFC 2047 encoded, other fields are UTF-8 (RFC 6532)} -setup {
+    set tok [myme::initialize -canonical text/plain -string x]
+    myme::setheader $tok Subject "Caf\u00e9"
+    myme::setheader $tok X-Name "J\u00fcrgen"
+} -body {
+    set msg [myme::buildmessage $tok]
+    list [regexp -line {^Subject: =\?UTF-8\?Q\?Caf=C3=A9\?=\r$} $msg] [regexp -line "^X-Name: J\xc3\xbcrgen\r$" $msg]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok msg
+} -result {1 1}
+
+# RFC 2231 parameters
+
+test myme-10.1 {RFC 2231 parameters are decoded and joined on parse} -setup {
+    set tok [myme::initialize -string "Content-Type: application/x-stuff;\n title*0*=us-ascii'en'This%20is%20even%20more%20;\n title*1*=%2A%2A%2Afun%2A%2A%2A%20;\n title*2=\"isn't it!\"; name*=utf-8''%E2%82%AC%20rates\n\nx"]
+} -body {
+    dictsort [myme::getproperty $tok params]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result [list name "\u20ac rates" title {This is even more ***fun*** isn't it!}]
+
+test myme-10.2 {long ASCII parameters use continuations} -body {
+    myme::formatparams attachment [dict create filename [string repeat abcdefghij 8].txt]
+} -result {attachment; filename*0="abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij"; filename*1="abcdefghijabcdefghij.txt"}
+
+test myme-10.3 {parseparams / formatparams round trip} -body {
+    set v [myme::formatparams Attachment [dict create filename "\u00e9t\u00e9 \"2026\".pdf" size 10]]
+    lassign [myme::parseparams $v] type params
+    list $v $type [dictsort $params]
+} -cleanup {
+    unset -nocomplain v type params
+} -result [list {Attachment; filename*=utf-8''%C3%A9t%C3%A9%20%222026%22.pdf; size="10"} attachment [list filename "\u00e9t\u00e9 \"2026\".pdf" size 10]]
+
+# Parsing
+
+test myme-11.1 {message/partial is a leaf, not an embedded message} -setup {
+    set tok [myme::initialize -string "Content-Type: message/partial; id=\"x@y\"; number=2\n\nnot a header line\n"]
+} -body {
+    list [myme::getproperty $tok content] [myme::getbody $tok]
+} -cleanup {
+    myme::finalize $tok
+    unset -nocomplain tok
+} -result [list message/partial "not a header line\n"]
+
+test myme-11.2 {multipart -string without a close-delimiter (RFC 2049)} -setup {
+    set tok [myme::initialize -string "Content-Type: multipart/mixed; boundary=B\n\n--B\nContent-Type: text/plain\n\none\n--B\nContent-Type: text/plain\n\ntwo\n"]
+} -body {
+    llength [myme::getproperty $tok parts]
+} -cleanup {
+    myme::finalize $tok -subordinates all
+    unset -nocomplain tok
+} -result 2
+
+test myme-11.3 {parsedatetime fields are in the date's own zone} -body {
+    set d "Thu, 08 Oct 2026 23:30:00 -0500"
+    list [myme::parsedatetime $d hour] [myme::parsedatetime $d mday] [myme::parsedatetime $d proper]
+} -cleanup {
+    unset -nocomplain d
+} -result {23 8 {Thu, 08 Oct 2026 23:30:00 -0500}}
+
+test myme-11.4 {parseaddress: no domain invented, friendly unquoted and decoded} -body {
+    lmap a [myme::parseaddress {jdoe, "John \"JD\" Doe" <jd@example.com>, =?UTF-8?Q?J=C3=BCrgen?= <j@example.com>}] {
+        list [dict get $a address] [dict get $a friendly]
+    }
+} -cleanup {
+    unset -nocomplain a
+} -result [list {jdoe jdoe} {jd@example.com {John "JD" Doe}} [list j@example.com "J\u00fcrgen"]]
+
+test myme-11.5 {field_decode leaves encoded-words with unknown charsets (RFC 2047 6.3)} -body {
+    myme::field_decode "=?x-unknown?Q?Hello?= =?UTF-8?Q?w=C3=B6rld?="
+} -result "=?x-unknown?Q?Hello?=w\u00f6rld"
+
+test myme-11.6 {word_encode takes characters by default} -body {
+    myme::word_encode utf-8 quoted-printable "\u00e9"
+} -result {=?UTF-8?Q?=C3=A9?=}
 
 test myme-5.1 {no tcllib dependencies loaded} -body {
     lmap pkg {base64 md5 tcl::chan::memchan tcl::chan::events tcl::chan::core Trf} {

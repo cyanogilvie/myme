@@ -56,6 +56,55 @@ namespace eval ::myme {
             default {error "unknown mode \"$what\""}
         }
     }
+
+    # tooctets --
+    #
+    #   Encodes the characters in string in the Tcl encoding enc, raising an
+    #   error for characters that the encoding can't represent.
+
+    if {[package vsatisfies [package provide Tcl] 9-]} {
+        proc tooctets {enc string} {
+            ::encoding convertto -profile strict $enc $string
+        }
+    } else {
+        proc tooctets {enc string} {
+            set octets [::encoding convertto $enc $string]
+            if {[::encoding convertfrom $enc $octets] ne $string} {
+                error "can't represent the characters in encoding $enc"
+            }
+            set octets
+        }
+    }
+
+    # octetsP --
+    #
+    #   Is string a string of octets (no characters above U+00FF)?
+
+    proc octetsP string {
+        expr {![regexp {[^\x00-\xFF]} $string]}
+    }
+
+    # headerchars --
+    #
+    #   Decodes the octets of a header field from a message being parsed:
+    #   UTF-8 (RFC 6532), or, failing that, octet for character.
+
+    if {[package vsatisfies [package provide Tcl] 9-]} {
+        proc headerchars octets {
+            if {[catch {::encoding convertfrom -profile strict utf-8 $octets} chars]} {
+                return $octets
+            }
+            set chars
+        }
+    } else {
+        proc headerchars octets {
+            set chars [::encoding convertfrom utf-8 $octets]
+            if {[::encoding convertto utf-8 $chars] ne $octets} {
+                return $octets
+            }
+            set chars
+        }
+    }
 }
 
 #
@@ -421,7 +470,14 @@ proc ::myme::initializeaux {token args} {
 
         switch -- $option {
             -canonical {
-                set state(content) [string tolower $value]
+                # May include parameters, which -param overrides
+                lassign [parsetype $token $value] state(content) inline
+                dict for {k v} $inline {
+                    if {![info exists params($k)]} {
+                        set params($k) $v
+                    }
+                }
+                set state(params) [array get params]
             }
 
             -param {
@@ -587,6 +643,10 @@ proc ::myme::initializeaux {token args} {
             set state(header) [array get header]
         }
 
+        if {$state(value) eq {string}} {
+            canonicaloctets $token
+        }
+
         set state(version) 1.0
         return
     }
@@ -602,6 +662,12 @@ proc ::myme::initializeaux {token args} {
     }
     if {[info exists state(parts)]} {
         error {-parts requires -canonical}
+    }
+    if {
+        [info exists state(string)] && $state(string) ne {}
+        && ![octetsP $state(string)]
+    } {
+        error {-string must be the octets (bytes) of a message, not characters above U+00FF}
     }
 
     if {[set fileP [info exists state(file)]]} {
@@ -633,6 +699,45 @@ proc ::myme::initializeaux {token args} {
     }
 
     return -options $opts $result
+}
+
+# ::myme::canonicaloctets --
+#
+#    Converts the -string of a canonical part to the octets of its body.
+#    For text/* the string is characters, encoded in the charset parameter
+#    (charset=utf-8 is added if there is none and the text isn't ASCII).
+#    For other types the string must already be octets.
+
+proc ::myme::canonicaloctets token {
+    # FRINK: nocheck
+    variable $token
+    upvar 0 $token state
+
+    if {[string match -nocase text/* $state(content)]} {
+        set charset {}
+        foreach {k v} $state(params) {
+            if {$k eq {charset}} {
+                set charset $v
+            }
+        }
+        if {$charset eq {}} {
+            if {![regexp {[^\x00-\x7F]} $state(string)]} {
+                return
+            }
+            set charset utf-8
+            lappend state(params) charset utf-8
+        }
+        set enc [reversemapencoding $charset]
+        if {$enc eq {}} {
+            error "unknown charset \"$charset\""
+        }
+        if {[catch {tooctets $enc $state(string)} octets]} {
+            error "-string has characters that charset \"$charset\" can't represent"
+        }
+        set state(string) $octets
+    } elseif {![octetsP $state(string)]} {
+        error "-string for $state(content) must be octets (bytes), not characters above U+00FF"
+    }
 }
 
 # ::myme::parsepart --
@@ -692,7 +797,8 @@ proc ::myme::parsepart {token} {
 	    ||
 	    [string first \t $line] == 0
 	)} {
-            append vline \n $line
+            # Unfold (RFC 5322 section 2.2.3)
+            append vline $line
             continue
         }
 
@@ -705,6 +811,7 @@ proc ::myme::parsepart {token} {
             continue
         }
 
+        set vline [headerchars $vline]
         if {
 	    [set x [string first : $vline]] <= 0
 	    ||
@@ -788,7 +895,10 @@ proc ::myme::parsepart {token} {
                 lrange $state(lines) $state(lines.current) end] \n]
         }
 
-        if {[string match message/* $state(content)]} {
+        # Only these message/* types contain a message (RFC 2046 section
+        # 5.2, RFC 6532 section 3.7, RFC 5537 section 4.3); others
+        # (message/partial, message/delivery-status, ...) are leaves
+        if {$state(content) in {message/rfc822 message/global message/news}} {
             # FRINK: nocheck
             variable [set child $token-[incr state(cid)]]
 
@@ -885,7 +995,10 @@ proc ::myme::parsepart {token} {
             incr pos [expr {$x + 1}]
         } else {
             if {$state(lines.current) >= $state(lines.count)} {
-                error "end-of-string encountered while parsing $state(content)"
+                # No close-delimiter: as for -file above (RFC 2049
+                # robustness)
+                set line "--$boundary--"
+                set forceoctet 1
             } else {
                 set line [lindex $state(lines) $state(lines.current)]
                 incr state(lines.current)
@@ -1111,7 +1224,7 @@ proc ::myme::parsetypeaux {token string} {
     while 1 {
         switch -- [parselexeme $token] {
             LX_END {
-                return [list $type [array get params]]
+                return [list $type [decodeparams [array get params]]]
             }
 
             LX_SEMICOLON {
@@ -1124,7 +1237,7 @@ proc ::myme::parsetypeaux {token string} {
 
         switch -- [parselexeme $token] {
             LX_END {
-                return [list $type [array get params]]
+                return [list $type [decodeparams [array get params]]]
             }
 
             LX_ATOM {
@@ -1357,6 +1470,305 @@ proc ::myme::getsize {token} {
 }
 
 
+# ::myme::decodeparams --
+#
+#    Decodes RFC 2231 parameters: joins continuations (name*0, name*1, ...)
+#    and decodes extended values (name*=charset'lang'%XX...) to characters,
+#    returning them under the plain name.  An extended value takes
+#    precedence over a plain one of the same name.
+#
+# Arguments:
+#       params     Dictionary of parameters as they appear in the header.
+#
+# Results:
+#       Dictionary of decoded parameters.
+
+proc ::myme::decodeparams params {
+    set result {}
+    set extended {}
+    set segments {}
+    dict for {k v} $params {
+        if {[regexp {^(.+?)\*([0-9]+)(\*?)$} $k - name n ext]} {
+            dict set segments $name [scan $n %d] [list $ext $v]
+        } elseif {[regexp {^(.+)\*$} $k - name]} {
+            dict set extended $name [decodeextended $v]
+        } else {
+            dict set result $k $v
+        }
+    }
+
+    dict for {name segs} $segments {
+        set octets  {}
+        set charset {}
+        foreach n [lsort -integer [dict keys $segs]] {
+            lassign [dict get $segs $n] ext v
+            if {$ext eq {}} {
+                append octets $v
+                continue
+            }
+            if {$n == 0 && [regexp {^([^']*)'[^']*'(.*)$} $v - charset v]} {
+                # charset'language' prefix on the first segment only
+            }
+            append octets [pctdecode $v]
+        }
+        dict set extended $name [extendedchars $charset $octets]
+    }
+
+    dict merge $result $extended
+}
+
+proc ::myme::decodeextended value {
+    if {![regexp {^([^']*)'[^']*'(.*)$} $value - charset value]} {
+        set charset {}
+    }
+    extendedchars $charset [pctdecode $value]
+}
+
+proc ::myme::pctdecode value {
+    subst -novariables -nocommands [
+        regsub -all {%([0-9A-Fa-f]{2})} [
+            string map {\\ \\\\} $value] {\\x\1}]
+}
+
+proc ::myme::extendedchars {charset octets} {
+    if {$charset eq {}} {
+        return [headerchars $octets]
+    }
+    set enc [reversemapencoding $charset]
+    if {$enc eq {}} {
+        # Unknown charset: leave the octets as they are
+        return $octets
+    }
+    ::encoding convertfrom $enc $octets
+}
+
+# ::myme::formatparam --
+#
+#    Formats a Content-Type (or Content-Disposition) parameter.  Values
+#    that are ASCII and short enough are emitted as quoted-strings, others
+#    with RFC 2231 continuations and, if not ASCII, as UTF-8 extended
+#    values.  An attribute already ending in "*" is taken as a ready-made
+#    extended value and emitted as-is.
+#
+# Arguments:
+#       attribute  The parameter name.
+#       value      The value (characters).
+#
+# Results:
+#       A list of attribute=value strings, to be separated by "; ".
+
+proc ::myme::formatparam {attribute value} {
+    # Leaves room for the attribute and quotes within a 78 character line
+    set max 60
+
+    if {[string index $attribute end] eq "*"} {
+        return [list $attribute=$value]
+    }
+
+    if {![regexp {[^\x20-\x7E]} $value]} {
+        set quoted [string map {\\ \\\\ \" \\\"} $value]
+        if {[string length $quoted] <= $max} {
+            return [list "$attribute=\"$quoted\""]
+        }
+        # Continuations, not splitting a quoted-pair
+        set result {}
+        set n 0
+        while {$quoted ne {}} {
+            set seg [string range $quoted 0 $max-1]
+            if {[regexp {(?:^|[^\\])(?:\\\\)*\\$} $seg]} {
+                set seg [string range $seg 0 end-1]
+            }
+            lappend result "$attribute*$n=\"$seg\""
+            set quoted [string range $quoted [string length $seg] end]
+            incr n
+        }
+        return $result
+    }
+
+    # Extended value: utf-8, percent-encoding all but attribute-chars
+    set pct {}
+    foreach c [split [::encoding convertto utf-8 $value] {}] {
+        if {[regexp {[A-Za-z0-9!#$&+.^_`|~-]} $c]} {
+            append pct $c
+        } else {
+            append pct [format %%%02X [scan $c %c]]
+        }
+    }
+    set pct "utf-8''$pct"
+    if {[string length $pct] <= $max} {
+        return [list "$attribute*=$pct"]
+    }
+    set result {}
+    set n 0
+    while {$pct ne {}} {
+        set seg [string range $pct 0 $max-1]
+        # Don't split a %XX
+        if {[regexp {%[0-9A-F]?$} $seg tail]} {
+            set seg [string range $seg 0 end-[string length $tail]]
+        }
+        lappend result "$attribute*$n*=$seg"
+        set pct [string range $pct [string length $seg] end]
+        incr n
+    }
+    return $result
+}
+
+# ::myme::parseparams --
+#
+#    Parses a header field value consisting of a token followed by
+#    parameters, such as Content-Disposition (RFC 2183), decoding RFC 2231
+#    parameters.
+#
+# Arguments:
+#       value      The header field value.
+#
+# Results:
+#       A list of the (lower-cased) token and a dictionary of the parameters.
+
+proc ::myme::parseparams value {
+    variable mime
+
+    set token [namespace current]::[incr mime(uid)]
+    # FRINK: nocheck
+    variable $token
+    try {
+        lassign [parsetype $token x/$value] type params
+    } finally {
+        unset -nocomplain $token
+    }
+    list [string range $type 2 end] $params
+}
+
+# ::myme::formatparams --
+#
+#    The inverse of parseparams: formats a header field value from a token
+#    and a dictionary of parameters, using RFC 2231 for values that are
+#    long or not ASCII.
+#
+# Arguments:
+#       value      The token, e.g. "attachment".
+#       params     Dictionary of parameters.
+#
+# Results:
+#       The header field value.
+
+proc ::myme::formatparams {value params} {
+    dict for {k v} $params {
+        foreach p [formatparam $k $v] {
+            append value "; $p"
+        }
+    }
+    set value
+}
+
+# ::myme::headerwords --
+#
+#    Splits a header field value into words (runs of non-whitespace, with
+#    quoted-strings kept whole) for folding.
+#
+# Arguments:
+#       value      The header field value.
+#
+# Results:
+#       A list of alternating preceding whitespace and word.
+
+proc ::myme::headerwords value {
+    set words  {}
+    set ws     {}
+    set word   {}
+    set quoteP 0
+    set escP   0
+    foreach c [split $value {}] {
+        if {$quoteP} {
+            append word $c
+            if {$escP} {
+                set escP 0
+            } elseif {$c eq "\\"} {
+                set escP 1
+            } elseif {$c eq "\""} {
+                set quoteP 0
+            }
+        } elseif {$c eq { } || $c eq "\t"} {
+            if {$word ne {}} {
+                lappend words $ws $word
+                set ws   {}
+                set word {}
+            }
+            append ws $c
+        } else {
+            append word $c
+            if {$c eq "\""} {
+                set quoteP 1
+            }
+        }
+    }
+    lappend words $ws $word
+}
+
+# ::myme::formatheader --
+#
+#    Formats a header field for output: validates it, RFC 2047 encodes the
+#    value of an unstructured field that isn't ASCII, folds it into lines of
+#    at most 78 characters where possible (RFC 5322 section 2.1.1), and
+#    encodes it as UTF-8 (RFC 6532).
+#
+# Arguments:
+#       name       The field name.
+#       value      The field value (characters).
+#
+# Results:
+#       The field as octets, with \n line endings, including the last.
+
+proc ::myme::formatheader {name value} {
+    if {![regexp {^[\x21-\x39\x3B-\x7E]+$} $name]} {
+        error "invalid header field name \"$name\""
+    }
+
+    # Unfold any folding already present: it is redone below
+    regsub -all {\r?\n([ \t])} $value {\1} value
+    # As parsing does
+    set value [string trim $value]
+    if {[regexp {[\r\n]} $value]} {
+        error "header field $name: value contains a line break"
+    }
+
+    if {
+        [string tolower $name] in {subject comments content-description}
+        &&
+        [regexp {[^\x00-\x7F]} $value]
+    } {
+        set value [word_encode utf-8 quoted-printable $value]
+        regsub -all {\n } $value { } value
+    }
+
+    # Fold before whitespace, keeping lines within 78 characters where
+    # there is whitespace to fold at
+    set line   "$name:"
+    set result {}
+    foreach {ws word} [headerwords " $value"] {
+        if {
+            [string length $line] + [string length $ws$word] > 78
+            &&
+            [string trim $line] ne "$name:"
+            &&
+            $ws ne {}
+        } {
+            append result $line\n
+            set line {}
+        }
+        append line $ws$word
+    }
+    append result $line\n
+
+    set octets [::encoding convertto utf-8 $result]
+    foreach l [split $octets \n] {
+        if {[string length $l] > 998} {
+            error "header field $name: a line is longer than 998 octets, and has no whitespace to fold at"
+        }
+    }
+    set octets
+}
+
 proc ::myme::getContentType token {
     variable $token
     upvar 0 $token state
@@ -1367,11 +1779,8 @@ proc ::myme::getContentType token {
         if {$k eq {boundary}} {
 	    set boundary $v
 	}
-        if {[string index $k end] eq "*"} {
-            # RFC 2231 extended-value: must not be quoted
-            append res ";\n              $k=$v"
-        } else {
-            append res ";\n              $k=\"[string map {\\ \\\\ \" \\\"} $v]\""
+        foreach p [formatparam $k $v] {
+            append res "; $p"
         }
     }
 
@@ -1388,11 +1797,11 @@ proc ::myme::getContentType token {
         append key [binary format I2 [list \
             [expr {int(rand()*0x100000000)}] \
             [expr {int(rand()*0x100000000)}]]]
-        set boundary "----- =_[base64 -mode encode -- $key]"
+        set boundary "=_myme_[base64 -mode encode -- $key]"
 
 	set state(boundary) $boundary
 
-        append res ";\n              boundary=\"$boundary\""
+        append res "; boundary=\"$boundary\""
     }
     return $res
 }
@@ -1868,8 +2277,15 @@ proc ::myme::getbodyaux {token reason {fragment {}}} {
 #       is being written to the channel.
 
 proc ::myme::copymessage {token channel} {
-    copypart $token [list ::myme::chansink $channel]
-    flush $channel
+    # The message is octets
+    set encoding [chan configure $channel -encoding]
+    chan configure $channel -encoding iso8859-1
+    try {
+        copypart $token [list ::myme::chansink $channel]
+        flush $channel
+    } finally {
+        chan configure $channel -encoding $encoding
+    }
     return
 }
 
@@ -1888,7 +2304,7 @@ proc ::myme::copymessage {token channel} {
 proc ::myme::buildmessage token {
     set message {}
     copypart $token [list ::myme::stringsink [info level]]
-    ::encoding convertto [::encoding system] $message
+    set message
 }
 
 # ::myme::chansink, ::myme::stringsink --
@@ -1970,7 +2386,7 @@ proc ::myme::copymessageaux {token sink} {
     # Includes Content-Transfer-Encoding
     set headers {}
     foreach {mixed value} [getheader $token] {
-        append headers "$mixed: $value\n"
+        append headers [formatheader $mixed $value]
     }
     {*}$sink text $headers
 
@@ -2577,14 +2993,10 @@ proc ::myme::parseaddressaux {token string} {
 
     set result {}
     while {[addr_next $token]} {
-        if {[set tail $state(domain)] ne {}} {
-            set tail @$state(domain)
-        } else {
-            set tail @[info hostname]
-        }
-        if {[set address $state(local)] ne {}} {
-            #TODO: this path is not covered by tests
-            append address $tail
+        # No domain is invented for a bare local-part
+        set address $state(local)
+        if {$address ne {} && $state(domain) ne {}} {
+            append address @$state(domain)
         }
 
         if {$state(phrase) ne {}} {
@@ -2643,6 +3055,9 @@ proc ::myme::parseaddressaux {token string} {
             }
         }
         set friendly [string trim $friendly \"]
+        # Undo quoted-pairs, and decode RFC 2047 encoded-words
+        regsub -all {\\(.)} $friendly {\1} friendly
+        set friendly [field_decode $friendly]
 
         lappend result [list address  $address        \
                              comment  $state(comment) \
@@ -3292,23 +3707,18 @@ namespace eval ::myme {
 proc ::myme::parsedatetime {value property} {
     if {$value eq "-now"} {
         set clock [clock seconds]
+        # Local time
+        set tzopt {}
+        set z [clock format $clock -format %z]
+        scan $z %1s%2d%2d sign h m
+        set zone [expr {($sign eq "-" ? -1 : 1) * ($h * 60 + $m)}]
     } else {
-        # Drop comments (CFWS), e.g. "-0700 (PDT)"
-        set value [string trim [regsub -all {\([^()]*\)} $value { }]]
-        if {[regexp {^(.*) ([+-])([0-9][0-9])([0-9][0-9])$} $value \
-            -> datetime zone_sign zone_hour zone_min]
-        } {
-            set clock [clock scan $datetime -gmt 1]
-            set zone_min [scan $zone_min %d]
-            set zone_hour [scan $zone_hour %d]
-            set zone [expr {60 * ($zone_min + 60 * $zone_hour)}]
-            if {$zone_sign eq "+"} {
-                set zone -$zone
-            }
-            incr clock $zone
-        } else {
-            set clock [clock scan $value]
-        }
+        lassign [datezone $value] datetime zone
+        set clock [expr {[clock scan $datetime -gmt 1] - $zone * 60}]
+        # The fields are those of the date-time as given, in its own zone
+        set tzopt [list -timezone [format %s%02d%02d \
+            [expr {$zone < 0 ? "-" : "+"}] \
+            [expr {abs($zone) / 60}] [expr {abs($zone) % 60}]]]
     }
 
     switch -- $property {
@@ -3317,151 +3727,128 @@ proc ::myme::parsedatetime {value property} {
         }
 
         hour {
-            set value [clock format $clock -format %H]
+            set value [clock format $clock -format %H {*}$tzopt]
         }
 
         lmonth {
             variable MONTHS_LONG
             return [lindex $MONTHS_LONG \
-                            [scan [clock format $clock -format %m] %d]]
+                            [scan [clock format $clock -format %m {*}$tzopt] %d]]
         }
 
         lweekday {
             variable WDAYS_LONG
-            return [lindex $WDAYS_LONG [clock format $clock -format %w]]
+            return [lindex $WDAYS_LONG [clock format $clock -format %w {*}$tzopt]]
         }
 
         mday {
-            set value [clock format $clock -format %d]
+            set value [clock format $clock -format %d {*}$tzopt]
         }
 
         min {
-            set value [clock format $clock -format %M]
+            set value [clock format $clock -format %M {*}$tzopt]
         }
 
         mon {
-            set value [clock format $clock -format %m]
+            set value [clock format $clock -format %m {*}$tzopt]
         }
 
         month {
             variable MONTHS_SHORT
             return [lindex $MONTHS_SHORT [
-		scan [clock format $clock -format %m] %d]]
+		scan [clock format $clock -format %m {*}$tzopt] %d]]
         }
 
         proper {
-            set gmt [clock format $clock -format "%Y-%m-%d %H:%M:%S" -gmt true]
-            if {[set diff [expr {($clock-[clock scan $gmt]) / 60}]] < 0} {
-                set s -
-                set diff [expr {-($diff)}]
-            } else {
-                set s +
-            }
-            set zone [format %s%02d%02d $s [
-                expr {$diff / 60}] [expr {$diff % 60}]]
-
+            # Locale independent day and month names
             variable WDAYS_SHORT
-            set wday [lindex $WDAYS_SHORT [clock format $clock -format %w]]
             variable MONTHS_SHORT
+            set wday [lindex $WDAYS_SHORT [clock format $clock -format %w {*}$tzopt]]
             set mon [lindex $MONTHS_SHORT [
-		scan [clock format $clock -format %m] %d]]
+		scan [clock format $clock -format %m {*}$tzopt] %d]]
 
             return [
-		clock format $clock -format "$wday, %d $mon %Y %H:%M:%S $zone"]
+		clock format $clock -format "$wday, %d $mon %Y %H:%M:%S %z" {*}$tzopt]
         }
 
         rclock {
-            #TODO: these paths are not covered by tests
-            if {$value eq "-now"} {
-                return 0
-            } else {
-                return [expr {[clock seconds] - $clock}]
-            }
+            return [expr {[clock seconds] - $clock}]
         }
 
         sec {
-            set value [clock format $clock -format %S]
+            set value [clock format $clock -format %S {*}$tzopt]
         }
 
         wday {
-            return [clock format $clock -format %w]
+            return [clock format $clock -format %w {*}$tzopt]
         }
 
         weekday {
             variable WDAYS_SHORT
-            return [lindex $WDAYS_SHORT [clock format $clock -format %w]]
+            return [lindex $WDAYS_SHORT [clock format $clock -format %w {*}$tzopt]]
         }
 
         yday {
-            set value [clock format $clock -format %j]
+            set value [clock format $clock -format %j {*}$tzopt]
         }
 
         year {
-            set value [clock format $clock -format %Y]
+            set value [clock format $clock -format %Y {*}$tzopt]
         }
 
         zone {
-            set value [string trim [string map [list \t { }] $value]]
-            if {[set x [string last { } $value]] < 0} {
-                return 0
-            }
-            set value [string range $value [expr {$x + 1}] end]
-            switch -- [set s [string index $value 0]] {
-                + - - {
-                    if {$s eq "+"} {
-                        #TODO: This path is not covered by tests
-                        set s {}
-                    }
-                    set value [string trim [string range $value 1 end]]
-                    if {(
-			    [string length $value] != 4)
-			||
-			    [scan $value %2d%2d h m] != 2
-			||
-			    $m > 59
-		    } {
-                        error "malformed timezone-specification: $value"
-                    }
-                    set value $s[expr {$h * 60 + $m}]
-                }
-
-                default {
-                    set value [string toupper $value]
-                    set z1 [list  UT GMT EST EDT CST CDT MST MDT PST PDT]
-                    set z2 [list   0   0  -5  -4  -6  -5  -7  -6  -8  -7]
-                    if {[set x [lsearch -exact $z1 $value]] < 0} {
-                        # Military and other unknown zones are treated as
-                        # -0000 (RFC 5322 section 4.3)
-                        set value 0
-                    } else {
-                        set value [expr {[lindex $z2 $x] * 60}]
-                    }
-                }
-            }
+            return $zone
         }
 
-        date2gmt
-            -
-        date2local
-            -
-        dst
-            -
-        sday
-            -
-        szone
-            -
-        tzone
-            -
         default {
             error "unknown property $property"
         }
     }
 
     if {[set value [string trimleft $value 0]] eq {}} {
-        #TODO: this path is not covered by tests
         set value 0
     }
     return $value
+}
+
+# ::myme::datezone --
+#
+#    Separates the zone from an RFC 5322 date-time.
+#
+# Arguments:
+#       value      The date-time.
+#
+# Results:
+#       A list of the date-time without the zone (and comments), and the
+#       zone as minutes east of UTC.  Missing, military and other unknown
+#       zones are taken as -0000 (RFC 5322 section 4.3), i.e. 0.
+
+proc ::myme::datezone value {
+    # Drop comments (CFWS), e.g. "-0700 (PDT)"
+    set value [string trim [regsub -all {\([^()]*\)} $value { }]]
+
+    if {[regexp {^(.*)\s([+-])([0-9]{2})([0-5][0-9])$} $value \
+        -> datetime sign h m]
+    } {
+        set zone [expr {[scan $h %d] * 60 + [scan $m %d]}]
+        if {$sign eq "-"} {
+            set zone [expr {-$zone}]
+        }
+        return [list [string trim $datetime] $zone]
+    }
+
+    if {[regexp {^(.*)\s([A-Za-z]+)$} $value -> datetime name]} {
+        set zones {UT 0 GMT 0 EST -5 EDT -4 CST -6 CDT -5 MST -7 MDT -6 PST -8 PDT -7}
+        set name [string toupper $name]
+        if {[dict exists $zones $name]} {
+            set zone [expr {[dict get $zones $name] * 60}]
+        } else {
+            set zone 0
+        }
+        return [list [string trim $datetime] $zone]
+    }
+
+    list $value 0
 }
 
 # ::myme::uniqueID --
@@ -3691,7 +4078,7 @@ proc ::myme::reversemapencoding {mimeType} {
 #       method    The encoding method (base64 or quoted-printable).
 #       string    The string to encode.
 #       ?-charset_encoded   0 or 1      Whether the data is already encoded
-#                                       in the specified charset (default 1)
+#                                       in the specified charset (default 0)
 #       ?-maxlength         maxlength   The maximum length of each encoded
 #                                       word to return (default 66)
 #
@@ -3714,8 +4101,9 @@ proc ::myme::word_encode {charset method string {args}} {
         error "unknown method '$method', must be base64 or quoted-printable"
     }
 
-    # default to encoded and a length that won't make the Subject header to long
-    array set options [list -charset_encoded 1 -maxlength 66]
+    # default to characters (not already encoded in charset) and a length
+    # that won't make the Subject header too long
+    array set options [list -charset_encoded 0 -maxlength 66]
     array set options $args
 
     if {$options(-charset_encoded)} {
@@ -3900,7 +4288,12 @@ proc ::myme::field_decode {field} {
             }
         }
 
-        set decoded [word_decode $encoded]
+        # An encoded-word with an unknown charset (or that is otherwise
+        # malformed) is left as it is (RFC 2047 section 6.3)
+        if {[catch {word_decode $encoded} decoded]} {
+            append result $encoded
+            continue
+        }
         foreach {charset - string} $decoded break
 
         append result [::encoding convertfrom $charset $string]
