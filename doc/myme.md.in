@@ -19,7 +19,7 @@ adjusting: l
 **@PACKAGE_NAME@::getproperty** *token* ?*property* | **-names**?\
 **@PACKAGE_NAME@::getheader** *token* ?*key* | **-names**?\
 **@PACKAGE_NAME@::setheader** *token* *key value* ?**-mode write** | **append** | **delete**?\
-**@PACKAGE_NAME@::getbody** *token* ?**-decode**? ?**-command** *callback* ?**-blocksize** *octets*??\
+**@PACKAGE_NAME@::getbody** *token* ?**-decode**? ?**-strict**? ?**-command** *callback* ?**-blocksize** *octets*??\
 **@PACKAGE_NAME@::copymessage** *token* *channel*\
 **@PACKAGE_NAME@::buildmessage** *token*\
 **@PACKAGE_NAME@::parseaddress** *string*\
@@ -174,7 +174,7 @@ that would need a line of more than 998 octets, is an error.
     :   All values associated with the key are removed (the *value*
         parameter is ignored).
 
-**@PACKAGE_NAME@::getbody** *token* ?**-decode**? ?**-command** *callback* ?**-blocksize** *octets*??
+**@PACKAGE_NAME@::getbody** *token* ?**-decode**? ?**-strict**? ?**-command** *callback* ?**-blocksize** *octets*??
 :   Returns a string containing the body of the leaf MIME part represented
     by *token* in canonical form.
 
@@ -202,8 +202,16 @@ that would need a line of more than 998 octets, is an error.
     entire body.
 
     Without **-decode** the body is returned as octets (in the part's
-    charset). With **-decode** it is decoded from the charset (US-ASCII if
-    none) into characters.
+    charset). With **-decode** it is decoded from the charset into
+    characters: US-ASCII if there is none, except for the
+    **message/global**, **message/global-headers**,
+    **message/global-delivery-status** and
+    **message/global-disposition-notification** types, which are UTF-8
+    (RFC 6532, RFC 6533). Octets that aren't valid in the charset become
+    U+FFFD (as the Unicode standard recommends for ill-formed input, since
+    declared charsets are often wrong), or with **-strict**, raise an
+    error. On Tcl 8.6, which has no encoding profiles, they are mapped
+    octet for character instead of to U+FFFD.
 
 **@PACKAGE_NAME@::copymessage** *token* *channel*
 :   Writes the MIME part represented by *token* to *channel* as octets
@@ -361,8 +369,8 @@ that would need a line of more than 998 octets, is an error.
 **@PACKAGE_NAME@::field_decode** *field*
 :   Returns *field* with its encoded-words decoded into characters.
     Whitespace between adjacent encoded-words is dropped (RFC 2047 section
-    6.2), and encoded-words that can't be decoded (e.g. an unknown
-    charset) are left as they are.
+    6.2), and encoded-words that can't be decoded (an unknown charset, or
+    octets that aren't valid in theirs) are left as they are (section 6.3).
 
 # DIFFERENCES FROM TCLLIB MIME
 

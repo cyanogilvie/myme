@@ -25,7 +25,7 @@
 
 package require Tcl 8.6-
 
-package provide myme 1.0.1
+package provide myme 1.0.2
 
 namespace eval ::myme {
     # Transfer encoders/decoders, called as:
@@ -101,6 +101,29 @@ namespace eval ::myme {
             set chars [::encoding convertfrom utf-8 $octets]
             if {[::encoding convertto utf-8 $chars] ne $octets} {
                 return $octets
+            }
+            set chars
+        }
+    }
+
+    # fromoctets --
+    #
+    #   Decodes octets in the Tcl encoding enc to characters.  With profile
+    #   replace (the default), octets that aren't valid in enc become U+FFFD
+    #   (the Unicode standard's practice for ill-formed input): mail's declared
+    #   charsets are often wrong, and an error would lose the whole text.  With
+    #   profile strict, they raise an error.  Tcl 8.6 has no encoding profiles:
+    #   there replace maps them as Tcl 8 always has (octet for character).
+
+    if {![catch {::encoding convertfrom -profile replace utf-8 {}}]} {
+        proc fromoctets {enc octets {profile replace}} {
+            ::encoding convertfrom -profile $profile $enc $octets
+        }
+    } else {
+        proc fromoctets {enc octets {profile replace}} {
+            set chars [::encoding convertfrom $enc $octets]
+            if {$profile eq "strict" && [::encoding convertto $enc $chars] ne $octets} {
+                error "octets not valid in encoding $enc"
             }
             set chars
         }
@@ -1539,7 +1562,7 @@ proc ::myme::extendedchars {charset octets} {
         # Unknown charset: leave the octets as they are
         return $octets
     }
-    ::encoding convertfrom $enc $octets
+    fromoctets $enc $octets
 }
 
 # ::myme::formatparam --
@@ -2033,10 +2056,15 @@ proc ::myme::setheader {token key value args} {
 #    If the -command option is absent, then the return value of
 #    myme::getbody is a string containing the MIME part's entire body.
 #
+#    With -decode, the body is decoded from its charset to characters:
+#    US-ASCII if it has none, but UTF-8 for the message/global types
+#    (RFC 6532, RFC 6533).  Octets that aren't valid in the charset become
+#    U+FFFD, or with -strict as well, raise an error.
+#
 # Arguments:
 #       token      The MIME token to parse.
 #       args       Optional arguments of the form:
-#                  ?-decode? ?-command callback ?-blocksize octets? ?
+#                  ?-decode? ?-strict? ?-command callback ?-blocksize octets? ?
 #
 # Results:
 #       Returns a string containing the MIME part's entire body, or
@@ -2051,6 +2079,11 @@ proc ::myme::getbody {token args} {
     set decode 0
     if {[set pos [lsearch -exact $args -decode]] >= 0} {
         set decode 1
+        set args [lreplace $args $pos $pos]
+    }
+    set profile replace
+    if {[set pos [lsearch -exact $args -strict]] >= 0} {
+        set profile strict
         set args [lreplace $args $pos $pos]
     }
 
@@ -2194,13 +2227,19 @@ proc ::myme::getbody {token args} {
 
         if {[info exists params(charset)]} {
             set charset $params(charset)
+        } elseif {[string tolower $state(content)] in {
+            message/global message/global-headers
+            message/global-delivery-status message/global-disposition-notification
+        }} {
+            # UTF-8 by definition (RFC 6532 section 3.7, RFC 6533)
+            set charset UTF-8
         } else {
             set charset US-ASCII
         }
 
         set enc [reversemapencoding $charset]
         if {$enc ne {}} {
-            set result [::encoding convertfrom $enc $result]
+            set result [fromoctets $enc $result $profile]
         } else {
             return -code error "-decode failed: can't reversemap charset $charset"
         }
@@ -4296,7 +4335,12 @@ proc ::myme::field_decode {field} {
         }
         foreach {charset - string} $decoded break
 
-        append result [::encoding convertfrom $charset $string]
+        # So is one whose octets aren't valid in its charset
+        if {[catch {fromoctets $charset $string strict} chars]} {
+            append result $encoded
+            continue
+        }
+        append result $chars
     }
     append result $field
     return $result

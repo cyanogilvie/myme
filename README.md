@@ -5,7 +5,7 @@ myme — Manipulation of MIME body parts
 # SYNOPSIS
 
 **package require Tcl 8.6-**  
-**package require myme ?1.0.1?**
+**package require myme ?1.0.2?**
 
 **myme::initialize** ?**-canonical** *type/subtype* ?**-param** {*key
 value*}…? ?**-encoding** *value*? ?**-header** {*key value*}…??
@@ -17,8 +17,8 @@ value*}…? ?**-encoding** *value*? ?**-header** {*key value*}…??
 **myme::getheader** *token* ?*key* \| **-names**?  
 **myme::setheader** *token* *key value* ?**-mode write** \| **append**
 \| **delete**?  
-**myme::getbody** *token* ?**-decode**? ?**-command** *callback*
-?**-blocksize** *octets*??  
+**myme::getbody** *token* ?**-decode**? ?**-strict**? ?**-command**
+*callback* ?**-blocksize** *octets*??  
 **myme::copymessage** *token* *channel*  
 **myme::buildmessage** *token*  
 **myme::parseaddress** *string*  
@@ -173,7 +173,7 @@ A new *value* is appended for the *key* (creating it as necessary).
 All values associated with the key are removed (the *value* parameter is
 ignored).
 
-**myme::getbody** *token* ?**-decode**? ?**-command** *callback* ?**-blocksize** *octets*??  
+**myme::getbody** *token* ?**-decode**? ?**-strict**? ?**-command** *callback* ?**-blocksize** *octets*??  
 Returns a string containing the body of the leaf MIME part represented
 by *token* in canonical form.
 
@@ -200,8 +200,16 @@ If the **-command** option is absent, then the return value of
 **myme::getbody** is a string containing the MIME part’s entire body.
 
 Without **-decode** the body is returned as octets (in the part’s
-charset). With **-decode** it is decoded from the charset (US-ASCII if
-none) into characters.
+charset). With **-decode** it is decoded from the charset into
+characters: US-ASCII if there is none, except for the
+**message/global**, **message/global-headers**,
+**message/global-delivery-status** and
+**message/global-disposition-notification** types, which are UTF-8 (RFC
+6532, RFC 6533). Octets that aren’t valid in the charset become U+FFFD
+(as the Unicode standard recommends for ill-formed input, since declared
+charsets are often wrong), or with **-strict**, raise an error. On Tcl
+8.6, which has no encoding profiles, they are mapped octet for character
+instead of to U+FFFD.
 
 **myme::copymessage** *token* *channel*  
 Writes the MIME part represented by *token* to *channel* as octets (the
@@ -358,8 +366,8 @@ method and the decoded octets.
 **myme::field_decode** *field*  
 Returns *field* with its encoded-words decoded into characters.
 Whitespace between adjacent encoded-words is dropped (RFC 2047 section
-6.2), and encoded-words that can’t be decoded (e.g. an unknown charset)
-are left as they are.
+6.2), and encoded-words that can’t be decoded (an unknown charset, or
+octets that aren’t valid in theirs) are left as they are (section 6.3).
 
 # DIFFERENCES FROM TCLLIB MIME
 

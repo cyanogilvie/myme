@@ -1238,6 +1238,54 @@ test myme-11.6 {word_encode takes characters by default} -body {
     myme::word_encode utf-8 quoted-printable "\u00e9"
 } -result {=?UTF-8?Q?=C3=A9?=}
 
+tcltest::testConstraint profiles [expr {![catch {encoding convertfrom -profile replace utf-8 {}}]}]
+
+test myme-12.1 {getbody -decode: message/global-delivery-status is UTF-8 (RFC 6533)} -body {
+    set tok [myme::initialize -string [join [list \
+        {Content-Type: multipart/report; report-type=delivery-status; boundary="b"} \
+        {} \
+        --b \
+        {Content-Type: message/global-delivery-status} \
+        {Content-Transfer-Encoding: base64} \
+        {} \
+        [binary encode base64 [encoding convertto utf-8 "Final-Recipient: utf-8; j\u00f6rg@example.com\r\n"]] \
+        --b-- \
+    ] \r\n]]
+    string trimright [myme::getbody [lindex [myme::getproperty $tok parts] 0] -decode]
+} -cleanup {
+    myme::finalize $tok -subordinates all
+} -result "Final-Recipient: utf-8; j\u00f6rg@example.com"
+
+test myme-12.2 {getbody -decode: octets invalid in the charset don't raise an error} -body {
+    set tok [myme::initialize -string "Content-Type: text/plain\r\n\r\ncaf\xe9 ok\r\n"]
+    string match "caf*ok" [string trimright [myme::getbody $tok -decode]]
+} -cleanup {
+    myme::finalize $tok
+} -result 1
+
+test myme-12.3 {getbody -decode: invalid octets become U+FFFD (where Tcl has encoding profiles)} -constraints profiles -body {
+    set tok [myme::initialize -string "Content-Type: text/plain; charset=utf-8\r\n\r\ncaf\xe9\r\n"]
+    string trimright [myme::getbody $tok -decode]
+} -cleanup {
+    myme::finalize $tok
+} -result "caf\ufffd"
+
+test myme-12.4 {field_decode: an encoded-word with octets invalid in its charset is left as it is (RFC 2047 6.3)} -body {
+    myme::field_decode {=?utf-8?q?caf=E9?= au lait =?utf-8?q?caf=C3=A9?=}
+} -result "=?utf-8?q?caf=E9?= au lait caf\u00e9"
+
+test myme-12.6 {getbody -decode -strict: octets invalid in the charset raise an error} -body {
+    set tok [myme::initialize -string "Content-Type: text/plain; charset=utf-8\r\n\r\ncaf\xe9\r\n"]
+    list [catch {myme::getbody $tok -decode -strict}] [string trimright [myme::getbody $tok -strict]]
+} -cleanup {
+    myme::finalize $tok
+} -result [list 1 "caf\xe9"]
+
+test myme-12.5 {RFC 2231 parameter with octets invalid in its charset doesn't raise an error} -body {
+    lassign [myme::parseparams "attachment; filename*=utf-8''caf%E9.txt"] disposition params
+    string match "caf*.txt" [dict get $params filename]
+} -result 1
+
 test myme-5.1 {no tcllib dependencies loaded} -body {
     lmap pkg {base64 md5 tcl::chan::memchan tcl::chan::events tcl::chan::core Trf} {
         if {[package provide $pkg] eq {}} continue

@@ -1,5 +1,5 @@
 project('myme',
-  version:            '1.0.1',
+  version:            '1.0.2',
   meson_version:      '>=1.3.0',
 )
 # Pure-Tcl module: myme is a single .tcl file distributed as a Tcl Module

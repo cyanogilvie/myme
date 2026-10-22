@@ -49,7 +49,7 @@ has one consistent model:
 | `-string` to parse (no `-canonical`) | **octets** of the whole message (otherwise error) |
 | `-file` (any type, canonical or parsed) | read as **octets**, unchanged (no charset conversion, no charset added) |
 | `getbody $tok` | **octets** (for text, in its charset) |
-| `getbody $tok -decode` | **characters** |
+| `getbody $tok -decode` | **characters**: US-ASCII if no charset, UTF-8 for `message/global*`; invalid octets become U+FFFD, or raise an error with `-strict` |
 | `buildmessage` | **octets** with CRLF line endings |
 | `copymessage $tok $chan` | writes **octets**. The channel's `-encoding` is set to iso8859-1 for the duration and then restored, so the channel's encoding no longer matters. `-translation` still decides line endings. |
 | header values (`setheader`, `-header`, `getheader`) | **characters** (see section 4) |
@@ -236,8 +236,8 @@ which break on quotes and non-ASCII names.
   encoded, so encoded-words are safe in address display names (RFC 2047
   §5(3)). Exact-output assertions on encoded words change.
 - `field_decode`:
-  - Encoded-words with an unknown charset (or otherwise undecodable) are
-    **left as they are**. mime raised an error. Drop the `catch` if it
+  - Encoded-words with an unknown charset, octets that aren't valid in
+    their charset, or otherwise undecodable are **left as they are**. mime raised an error. Drop the `catch` if it
     was only for that, and check for leftover `=?...?=` if needed.
   - `=?charset*lang?...?=` (RFC 2231 §5) is accepted.
   - Encoded trailing spaces (`..._?=`) are no longer dropped (tcllib
